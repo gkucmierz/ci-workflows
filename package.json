@@ -18,5 +18,6 @@
     "7u.pl"
   ],
   "author": "Grzegorz Kućmierz",
-  "license": "MIT"
+  "license": "UNLICENSED",
+  "private": true
 }
