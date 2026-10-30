@@ -1,0 +1,106 @@
+name: Reusable Zero-Downtime Build & Deploy (with Dependency Readiness Gate)
+
+on:
+  workflow_call:
+    inputs:
+      container_name:
+        description: 'Nazwa kontenera Docker (np. science-blog)'
+        required: true
+        type: string
+      runs_on:
+        description: 'Etykieta runnera Gitea (self-hosted-pl lub self-hosted-de)'
+        required: false
+        type: string
+        default: 'self-hosted-pl'
+      hot_swap_static:
+        description: 'Atomowy hot-swap statycznych plików Nginx (true dla SPA/VitePress, false dla backendów Node)'
+        required: false
+        type: boolean
+        default: true
+      wait_timeout_sec:
+        description: 'Limit czasu oczekiwania na publikację zależności @gkucmierz/* w NPM (s)'
+        required: false
+        type: number
+        default: 180
+
+jobs:
+  deploy:
+    name: Deploy (${{ inputs.container_name }})
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Wait for @gkucmierz/* dependencies in NPM registry
+        env:
+          WAIT_FOR_DEPS_TIMEOUT_SEC: ${{ inputs.wait_timeout_sec }}
+        run: |
+          node -e '
+          const fs = require("fs");
+          const path = require("path");
+          const files = ["package.json", "ui/package.json", "server/package.json"].filter(f => fs.existsSync(f));
+          const deps = new Map();
+          for (const f of files) {
+            const p = JSON.parse(fs.readFileSync(f, "utf8"));
+            for (const [k, v] of Object.entries({ ...(p.dependencies || {}), ...(p.devDependencies || {}) })) {
+              if (k.startsWith("@gkucmierz/") && !String(v).startsWith("file:")) deps.set(k, String(v).replace(/^[^\d]*/, "").split("-")[0]);
+            }
+          }
+          const cmp = (a, b) => {
+            const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
+            for (let i = 0; i < 3; i++) if ((pa[i]||0) !== (pb[i]||0)) return (pa[i]||0) - (pb[i]||0);
+            return 0;
+          };
+          (async () => {
+            const deadline = Date.now() + (Number(process.env.WAIT_FOR_DEPS_TIMEOUT_SEC || 180) * 1000);
+            for (const [name, minVer] of deps.entries()) {
+              while (true) {
+                try {
+                  const res = await fetch("https://registry.npmjs.org/" + name.replace("/", "%2f") + "?t=" + Date.now(), { headers: { "Cache-Control": "no-cache" } });
+                  if (res.ok) {
+                    const data = await res.json();
+                    const vers = Object.keys(data.versions || {}).filter(v => cmp(v, minVer) >= 0);
+                    if (vers.length > 0) {
+                      console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny (" + vers[vers.length - 1] + ")");
+                      break;
+                    }
+                  }
+                } catch {}
+                if (Date.now() >= deadline) {
+                  console.error("❌ [wait-for-deps] Timeout oczekiwania na " + name + ">=" + minVer);
+                  process.exit(1);
+                }
+                console.log("⏳ [wait-for-deps] Czekam 5s na publikację " + name + ">=" + minVer + " w npmjs...");
+                await new Promise(r => setTimeout(r, 5000));
+              }
+            }
+          })();
+          '
+
+      - name: Build and deploy with Docker Compose (Zero-Downtime)
+        run: |
+          CONTAINER="${{ inputs.container_name }}"
+          HOT_SWAP="${{ inputs.hot_swap_static }}"
+          docker compose build
+          if [ "$HOT_SWAP" = "true" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
+            IMG_NAME=$(docker compose config --images 2>/dev/null | head -n 1)
+            IMG_ID=$(docker image inspect -f '{{.Id}}' "$IMG_NAME" 2>/dev/null | head -n 1)
+            if [ -n "$IMG_ID" ]; then
+              TMP_CID=$(docker create "$IMG_ID")
+              TMP_DIR=$(mktemp -d)
+              docker cp "$TMP_CID:/usr/share/nginx/html/." "$TMP_DIR/"
+              docker cp "$TMP_DIR/." "$CONTAINER:/usr/share/nginx/html/"
+              docker cp "$TMP_CID:/etc/nginx/conf.d/default.conf" "$TMP_DIR/default.conf" 2>/dev/null && docker cp "$TMP_DIR/default.conf" "$CONTAINER:/etc/nginx/conf.d/default.conf" 2>/dev/null || true
+              rm -rf "$TMP_DIR"
+              docker rm -f "$TMP_CID" >/dev/null 2>&1 || true
+              docker exec "$CONTAINER" nginx -s reload
+            else
+              docker compose up -d --remove-orphans
+            fi
+          else
+            docker compose up -d --remove-orphans
+          fi
+          for npm_cid in $(docker ps -q --filter "ancestor=jc21/nginx-proxy-manager" --filter "status=running"); do
+            docker exec "$npm_cid" nginx -s reload 2>/dev/null || true
+          done

@@ -1,0 +1,22 @@
+{
+  "name": "@gkucmierz/ci-workflows",
+  "version": "1.0.0",
+  "description": "Reusable Gitea Actions, Composite Actions (wait-for-deps, zero-downtime-swap) and Workflow Templates for the 7u.pl Ecosystem",
+  "type": "module",
+  "bin": {
+    "wait-for-deps": "./bin/wait-for-deps.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "wait-for-deps": "node ./bin/wait-for-deps.mjs"
+  },
+  "keywords": [
+    "gitea-actions",
+    "ci-cd",
+    "zero-downtime",
+    "dependency-gate",
+    "7u.pl"
+  ],
+  "author": "Grzegorz Kućmierz",
+  "license": "MIT"
+}

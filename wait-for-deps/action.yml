@@ -1,0 +1,31 @@
+name: 'Wait for Scoped NPM Dependencies (Dependency Readiness Gate)'
+description: 'Asynchroniczny poczekiwacz sprawdzający przed docker compose build, czy wszystkie wymagane wersje bibliotek @gkucmierz/* są już opublikowane i ściągalne z rejestru NPM.'
+inputs:
+  working_directory:
+    description: 'Katalog projektu z plikiem package.json'
+    required: false
+    default: '.'
+  timeout_sec:
+    description: 'Maksymalny czas oczekiwania w sekundach (domyślnie 180s)'
+    required: false
+    default: '180'
+  interval_sec:
+    description: 'Odstęp między odpytaniami rejestru w sekundach (domyślnie 5s)'
+    required: false
+    default: '5'
+  scope:
+    description: 'Prefiks przestrzeni nazw paczek (domyślnie @gkucmierz/)'
+    required: false
+    default: '@gkucmierz/'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Verify and wait for @gkucmierz/* packages in NPM registry
+      shell: bash
+      env:
+        WAIT_FOR_DEPS_TIMEOUT_SEC: ${{ inputs.timeout_sec }}
+        WAIT_FOR_DEPS_INTERVAL_SEC: ${{ inputs.interval_sec }}
+        WAIT_FOR_DEPS_SCOPE: ${{ inputs.scope }}
+      run: |
+        node "${{ github.action_path }}/../bin/wait-for-deps.mjs" "${{ inputs.working_directory }}"

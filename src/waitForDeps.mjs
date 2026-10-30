@@ -1,0 +1,264 @@
+import fs from 'node:fs'
+import path from 'node:path'
+
+/**
+ * Parses a SemVer string `X.Y.Z` into `{ major, minor, patch }`.
+ */
+export const parseSemver = (versionStr) => {
+  const clean = String(versionStr || '')
+    .trim()
+    .replace(/^[^\d]*/, '')
+    .split('-')[0]
+  const parts = clean.split('.').map((n) => Number.parseInt(n, 10))
+  if (parts.length < 3 || parts.some((n) => Number.isNaN(n))) {
+    return null
+  }
+  return { major: parts[0], minor: parts[1], patch: parts[2] }
+}
+
+/**
+ * Compares two SemVer strings `a` and `b`. Returns:
+ *  1 if a > b, -1 if a < b, 0 if a === b.
+ */
+export const compareSemver = (a, b) => {
+  const va = parseSemver(a)
+  const vb = parseSemver(b)
+  if (!va || !vb) return 0
+  if (va.major !== vb.major) return va.major > vb.major ? 1 : -1
+  if (va.minor !== vb.minor) return va.minor > vb.minor ? 1 : -1
+  if (va.patch !== vb.patch) return va.patch > vb.patch ? 1 : -1
+  return 0
+}
+
+/**
+ * Checks whether a published `candidateVersion` satisfies `rangeSpec`
+ * (supports exact `1.2.0`, caret `^1.2.0`, tilde `~1.2.0`, `>=1.2.0`, or `*`/`latest`).
+ */
+export const isVersionSatisfied = (candidateVersion, rangeSpec) => {
+  const raw = String(rangeSpec || '').trim()
+  if (!raw || raw === '*' || raw === 'latest') {
+    return Boolean(parseSemver(candidateVersion))
+  }
+
+  const cand = parseSemver(candidateVersion)
+  const floor = parseSemver(raw)
+  if (!cand || !floor) return false
+
+  if (raw.startsWith('^')) {
+    if (floor.major > 0) {
+      return cand.major === floor.major && compareSemver(candidateVersion, raw) >= 0
+    }
+    return (
+      cand.major === 0 &&
+      cand.minor === floor.minor &&
+      compareSemver(candidateVersion, raw) >= 0
+    )
+  }
+
+  if (raw.startsWith('~')) {
+    return (
+      cand.major === floor.major &&
+      cand.minor === floor.minor &&
+      cand.patch >= floor.patch
+    )
+  }
+
+  if (raw.startsWith('>=')) {
+    return compareSemver(candidateVersion, raw) >= 0
+  }
+
+  // Exact match
+  return (
+    cand.major === floor.major &&
+    cand.minor === floor.minor &&
+    cand.patch === floor.patch
+  )
+}
+
+/**
+ * Scans `rootDir` (and standard subpackages `ui`, `server`, `crawler`) for `package.json`
+ * and extracts all dependencies matching `scopePrefix` (default `@gkucmierz/`).
+ */
+export const extractScopedDependencies = (
+  rootDir = process.cwd(),
+  scopePrefix = '@gkucmierz/'
+) => {
+  const candidateFiles = [
+    path.join(rootDir, 'package.json'),
+    path.join(rootDir, 'ui', 'package.json'),
+    path.join(rootDir, 'server', 'package.json'),
+    path.join(rootDir, 'crawler', 'package.json')
+  ]
+
+  const requiredMap = new Map()
+
+  for (const file of candidateFiles) {
+    if (!fs.existsSync(file)) continue
+    try {
+      const pkg = JSON.parse(fs.readFileSync(file, 'utf8'))
+      const merged = {
+        ...(pkg.dependencies || {}),
+        ...(pkg.devDependencies || {})
+      }
+      for (const [depName, rangeSpec] of Object.entries(merged)) {
+        if (!depName.startsWith(scopePrefix)) continue
+        if (String(rangeSpec).startsWith('file:') || String(rangeSpec).startsWith('workspace:')) {
+          continue
+        }
+        const prev = requiredMap.get(depName)
+        if (!prev || compareSemver(rangeSpec, prev) > 0) {
+          requiredMap.set(depName, String(rangeSpec).trim())
+        }
+      }
+    } catch {
+      // Ignore malformed package.json
+    }
+  }
+
+  return Array.from(requiredMap.entries()).map(([name, range]) => ({ name, range }))
+}
+
+/**
+ * Checks whether at least one version satisfying `range` is published AND its tarball is reachable
+ * on the NPM registry (`https://registry.npmjs.org`).
+ */
+export const checkPackageAvailability = async (
+  pkgName,
+  range,
+  {
+    registryUrl = 'https://registry.npmjs.org',
+    fetchImpl = globalThis.fetch
+  } = {}
+) => {
+  const encodedName = pkgName.replace('/', '%2f')
+  const url = `${registryUrl.replace(/\/$/, '')}/${encodedName}?t=${Date.now()}`
+
+  try {
+    const res = await fetchImpl(url, {
+      headers: {
+        Accept: 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        Pragma: 'no-cache'
+      }
+    })
+    if (!res.ok) {
+      return {
+        available: false,
+        matchedVersion: null,
+        latestVersion: null,
+        reason: `HTTP ${res.status}`
+      }
+    }
+
+    const data = await res.json()
+    const versionsObj = data?.versions || {}
+    const allVersions = Object.keys(versionsObj).sort(compareSemver)
+    const latestVersion = data?.['dist-tags']?.latest || allVersions[allVersions.length - 1] || null
+
+    const matchingVersions = allVersions.filter((v) => isVersionSatisfied(v, range))
+    if (matchingVersions.length === 0) {
+      return {
+        available: false,
+        matchedVersion: null,
+        latestVersion,
+        reason: `Brak wersji spełniającej ${range} (najnowsza w rejestrze: ${latestVersion || 'brak'})`
+      }
+    }
+
+    const bestMatch = matchingVersions[matchingVersions.length - 1]
+    const tarballUrl = versionsObj[bestMatch]?.dist?.tarball
+
+    if (tarballUrl) {
+      const headRes = await fetchImpl(tarballUrl, { method: 'HEAD' })
+      if (!headRes.ok) {
+        return {
+          available: false,
+          matchedVersion: bestMatch,
+          latestVersion,
+          reason: `Metadane ${bestMatch} widoczne, ale tarball CDN zwraca HTTP ${headRes.status}`
+        }
+      }
+    }
+
+    return {
+      available: true,
+      matchedVersion: bestMatch,
+      latestVersion,
+      reason: 'OK'
+    }
+  } catch (err) {
+    return {
+      available: false,
+      matchedVersion: null,
+      latestVersion: null,
+      reason: err?.message || String(err)
+    }
+  }
+}
+
+/**
+ * Polls asynchronously until all scoped dependencies are downloadable from the registry,
+ * or throws an error after `timeoutMs`.
+ */
+export const waitForAllDependencies = async (
+  deps,
+  {
+    timeoutMs = 180e3,
+    pollIntervalMs = 5e3,
+    registryUrl = 'https://registry.npmjs.org',
+    fetchImpl = globalThis.fetch,
+    sleepImpl = (ms) => new Promise((r) => setTimeout(r, ms)),
+    logger = console
+  } = {}
+) => {
+  if (!deps || deps.length === 0) {
+    logger.log('✅ [wait-for-deps] Brak zewnętrznych zależności @gkucmierz/* do weryfikacji.')
+    return { ok: true, resolved: [] }
+  }
+
+  const startTime = Date.now()
+  let attempt = 0
+
+  while (true) {
+    attempt++
+    const pending = []
+    const resolved = []
+
+    for (const dep of deps) {
+      const status = await checkPackageAvailability(dep.name, dep.range, {
+        registryUrl,
+        fetchImpl
+      })
+      if (status.available) {
+        resolved.push({ ...dep, matchedVersion: status.matchedVersion })
+      } else {
+        pending.push({ ...dep, ...status })
+      }
+    }
+
+    if (pending.length === 0) {
+      for (const r of resolved) {
+        logger.log(`✅ [wait-for-deps] ${r.name}@${r.range} -> dostępny (${r.matchedVersion})`)
+      }
+      return { ok: true, resolved, attempts: attempt }
+    }
+
+    const elapsedMs = Date.now() - startTime
+    if (elapsedMs + pollIntervalMs > timeoutMs) {
+      const details = pending
+        .map((p) => `${p.name}@${p.range} (${p.reason})`)
+        .join(', ')
+      throw new Error(
+        `[wait-for-deps] Przekroczono limit czasu (${Math.round(timeoutMs / 1000)}s) oczekiwania na paczki: ${details}`
+      )
+    }
+
+    for (const p of pending) {
+      logger.log(
+        `⏳ [wait-for-deps] Próba #${attempt}: Oczekiwanie na ${p.name}@${p.range} — ${p.reason}. Kolejne sprawdzenie za ${Math.round(pollIntervalMs / 1000)}s...`
+      )
+    }
+
+    await sleepImpl(pollIntervalMs)
+  }
+}
