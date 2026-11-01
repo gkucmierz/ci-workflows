@@ -10,8 +10,20 @@ import {
   extractScopedDependencies,
   waitForAllDependencies
 } from '../src/waitForDeps.mjs'
+import { scanRepositoryForLeaks } from '../src/sanitizeRepo.mjs'
 
 describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
+  it('scans non-git directories (e.g. inside node:22-alpine Docker build context) without throwing git ENOENT', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-nogit-'))
+    try {
+      fs.writeFileSync(path.join(tmp, 'clean.js'), 'export const x = 42;\n')
+      const res = scanRepositoryForLeaks(tmp)
+      assert.equal(res.clean, true)
+      assert.equal(res.scannedCount, 1)
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  })
   it('parses and compares SemVer ranges accurately (^, ~, >=, exact)', () => {
     assert.deepEqual(parseSemver('^1.2.0'), { major: 1, minor: 2, patch: 0 })
     assert.equal(compareSemver('1.2.0', '1.1.9'), 1)
