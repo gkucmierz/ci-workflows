@@ -151,13 +151,12 @@ jobs:
           NAME=$(node -p "require('./package.json').name")
           VER=$(node -p "require('./package.json').version")
           SCOPE=$(node -p "const n=require('./package.json').name; n.startsWith('@') ? n.split('/')[0] : ''")
-          EXISTS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/${NAME/\//%2f}/${VER}")
-          if [ "$EXISTS" = "200" ]; then
-            echo "ℹ️ ${NAME}@${VER} is already published on registry.npmjs.org — skipping."
-            exit 0
-          fi
           if [ -n "$SCOPE" ]; then
             printf "%s:registry=https://registry.npmjs.org/\n" "$SCOPE" >> "$TMP_NPMRC"
           fi
           printf "registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=%s\n" "$NODE_AUTH_TOKEN" >> "$TMP_NPMRC"
+          if NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm view "${NAME}@${VER}" --registry="https://registry.npmjs.org/" version >/dev/null 2>&1; then
+            echo "ℹ️ ${NAME}@${VER} is already published on registry.npmjs.org — skipping."
+            exit 0
+          fi
           NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm publish --registry="https://registry.npmjs.org/" --access public || echo "⚠️ Public npmjs.org publish skipped (token expired, 2FA required, or version already exists)."
