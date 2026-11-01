@@ -20,14 +20,14 @@ jobs:
         with:
           run_tests: 'true'
 
-      - name: Dual-Publish Package (registry.npmjs.org + Gitea Packages)
+      - name: Dual-Publish Package (Gitea Packages + registry.npmjs.org)
         uses: ./publish-npm-dual
         with:
           run_build: 'false'
           publish_npmjs: 'true'
           publish_private: 'true'
-          npm_token: ${{ secrets.NPM_AUTH_TOKEN }}
-          private_token: ${{ secrets.LOCAL_PACKAGE_REGISTRY }}
+          npm_token: ${{ secrets.NPM_AUTH_TOKEN || secrets.NPM_TOKEN }}
+          private_token: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Zero-Downtime SPA Build & Nginx Hot-Swap (ci.7u.pl)
         uses: ./zero-downtime-swap

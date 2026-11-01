@@ -52,28 +52,7 @@ runs:
         fi
         npm pack --dry-run
 
-    - name: Publish to Public NPM Registry (registry.npmjs.org)
-      if: ${{ inputs.publish_npmjs == 'true' }}
-      shell: bash
-      working-directory: ${{ inputs.working_directory }}
-      env:
-        NODE_AUTH_TOKEN: ${{ inputs.npm_token }}
-      run: |
-        if [ -z "$NODE_AUTH_TOKEN" ]; then
-          echo "⚠️ npm_token is empty, skipping registry.npmjs.org publish."
-          exit 0
-        fi
-        NAME=$(node -p "require('./package.json').name")
-        VER=$(node -p "require('./package.json').version")
-        EXISTS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/${NAME/\//%2f}/${VER}")
-        if [ "$EXISTS" = "200" ]; then
-          echo "ℹ️ ${NAME}@${VER} is already published on registry.npmjs.org — skipping."
-          exit 0
-        fi
-        npm config set "//registry.npmjs.org/:_authToken" "$NODE_AUTH_TOKEN"
-        npm publish --registry="https://registry.npmjs.org" --access public
-
-    - name: Publish to Private Registry (Gitea / Gitee)
+    - name: Publish to Private Registry (Gitea / Gitee — Primary)
       if: ${{ inputs.publish_private == 'true' }}
       shell: bash
       working-directory: ${{ inputs.working_directory }}
@@ -85,6 +64,46 @@ runs:
           echo "⚠️ private_token is empty, skipping private registry publish."
           exit 0
         fi
-        REG_HOST=$(echo "$PRIVATE_REGISTRY" | sed -E 's|^https?://||')
-        npm config set "//${REG_HOST}:_authToken" "$NODE_AUTH_TOKEN"
-        npm publish --registry="$PRIVATE_REGISTRY" || echo "ℹ️ Version already exists in private registry, skipping."
+        TMP_NPMRC=$(mktemp)
+        trap 'rm -f "$TMP_NPMRC"' EXIT
+        NAME=$(node -p "require('./package.json').name")
+        VER=$(node -p "require('./package.json').version")
+        SCOPE=$(node -p "const n=require('./package.json').name; n.startsWith('@') ? n.split('/')[0] : ''")
+        REG_CLEAN=$(echo "$PRIVATE_REGISTRY" | sed -E 's|/*$|/|')
+        REG_HOST=$(echo "$REG_CLEAN" | sed -E 's|^https?://||')
+        if [ -n "$SCOPE" ]; then
+          printf "%s:registry=%s\n" "$SCOPE" "$REG_CLEAN" >> "$TMP_NPMRC"
+        fi
+        printf "registry=%s\n//%s:_authToken=%s\nalways-auth=true\n" "$REG_CLEAN" "$REG_HOST" "$NODE_AUTH_TOKEN" >> "$TMP_NPMRC"
+        if NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm view "${NAME}@${VER}" --registry="$REG_CLEAN" version >/dev/null 2>&1; then
+          echo "ℹ️ ${NAME}@${VER} is already published in private registry — skipping."
+          exit 0
+        fi
+        NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm publish --registry="$REG_CLEAN" || echo "ℹ️ Private registry publish skipped (version already exists or token unauthorized)."
+
+    - name: Publish to Public NPM Registry (registry.npmjs.org — Secondary)
+      if: ${{ inputs.publish_npmjs == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        NODE_AUTH_TOKEN: ${{ inputs.npm_token }}
+      run: |
+        if [ -z "$NODE_AUTH_TOKEN" ]; then
+          echo "⚠️ npm_token is empty, skipping registry.npmjs.org publish."
+          exit 0
+        fi
+        TMP_NPMRC=$(mktemp)
+        trap 'rm -f "$TMP_NPMRC"' EXIT
+        NAME=$(node -p "require('./package.json').name")
+        VER=$(node -p "require('./package.json').version")
+        SCOPE=$(node -p "const n=require('./package.json').name; n.startsWith('@') ? n.split('/')[0] : ''")
+        EXISTS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/${NAME/\//%2f}/${VER}")
+        if [ "$EXISTS" = "200" ]; then
+          echo "ℹ️ ${NAME}@${VER} is already published on registry.npmjs.org — skipping."
+          exit 0
+        fi
+        if [ -n "$SCOPE" ]; then
+          printf "%s:registry=https://registry.npmjs.org/\n" "$SCOPE" >> "$TMP_NPMRC"
+        fi
+        printf "registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=%s\n" "$NODE_AUTH_TOKEN" >> "$TMP_NPMRC"
+        NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm publish --registry="https://registry.npmjs.org/" --access public || echo "⚠️ Public npmjs.org publish skipped (token expired, 2FA required, or version already exists)."
