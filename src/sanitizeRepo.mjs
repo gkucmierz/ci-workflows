@@ -37,10 +37,14 @@ const FORBIDDEN_RULES = [
  * and token-slicing / obfuscation patterns.
  */
 export const scanRepositoryForLeaks = (rootDir = process.cwd()) => {
-  const tracked = execFileSync('git', ['ls-files'], {
-    cwd: rootDir,
-    encoding: 'utf8'
-  })
+  const tracked = execFileSync(
+    'git',
+    ['ls-files', '--cached', '--others', '--exclude-standard'],
+    {
+      cwd: rootDir,
+      encoding: 'utf8'
+    }
+  )
     .split('\n')
     .map((s) => s.trim())
     .filter(Boolean)

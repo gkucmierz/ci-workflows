@@ -410,7 +410,7 @@ const cliAndActionsCatalog = computed(() =>
           kind: 'CLI & Bramka Pre-Publish',
           invocation: 'npx @gkucmierz/ci-workflows oss-sanitize-check',
           purpose:
-            'Skanuje wszystkie śledzone przez Git pliki pod kątem ścieżek /Users/<user>/, plików .agents, kluczy PEM, jawnych tokenów API, sklejanych prefiksów ("ghp_" + ...) oraz cięcia sekretów w logach (TOKEN.slice).'
+            'Skanuje wszystkie śledzone przez Git pliki pod kątem ścieżek /Users/<user>/, plików .agents, kluczy PEM, jawnych tokenów API, sklejanych prefiksów (<prefix>_ + ...) oraz cięcia sekretów w logach (<TOKEN>.slice).'
         },
         {
           name: 'oss-sanitize-gate',
@@ -447,7 +447,7 @@ const cliAndActionsCatalog = computed(() =>
           kind: 'CLI & Pre-Publish Gate',
           invocation: 'npx @gkucmierz/ci-workflows oss-sanitize-check',
           purpose:
-            'Scans all git-tracked files for /Users/<user>/ paths, tracked .agents files, PEM keys, raw API tokens, sliced token prefixes ("ghp_" + ...), and secret log-slicing (TOKEN.slice).'
+            'Scans all git-tracked files for /Users/<user>/ paths, tracked .agents files, PEM keys, raw API tokens, sliced token prefixes (<prefix>_ + ...), and secret log-slicing (<TOKEN>.slice).'
         },
         {
           name: 'oss-sanitize-gate',
@@ -479,12 +479,12 @@ const securityRules = computed(() =>
         {
           ruleId: 'SLICED_TOKEN_PREFIX',
           title: 'Ochrona przed cięciem i sklejaniem tokenów (Anti-Token-Slicing)',
-          desc: 'Wykrywa próby ominięcia skanerów Push Protection / Gitleaks przez rozbijanie prefiksów w kodzie (np. "ghp_" + "abc..." lub ["npm", "_"].join("")).'
+          desc: 'Wykrywa próby ominięcia skanerów Push Protection / Gitleaks przez rozbijanie prefiksów w kodzie (np. konkatenacja prefiksów ghp_… / npm_… lub sklejanie tablic znaków).'
         },
         {
           ruleId: 'SECRET_LOG_SLICING',
           title: 'Ochrona maskowania sekretów w logach runnera (Mask-Bypass Guard)',
-          desc: 'Gitea Actions (act_runner) i GitHub Actions maskują na *** tylko pełny string sekretu. Wywołanie TOKEN.slice(0, 8) omija maskowanie i drukuje jawny fragment klucza w logach — skaner blokuje takie konstrukcje.'
+          desc: 'Gitea Actions (act_runner) i GitHub Actions maskują na *** tylko pełny string sekretu. Wywołanie <TOKEN>.slice(0, 8) omija maskowanie i drukuje jawny fragment klucza w logach — skaner blokuje takie konstrukcje.'
         },
         {
           ruleId: 'LOCAL_HOST_PATH',
@@ -501,12 +501,12 @@ const securityRules = computed(() =>
         {
           ruleId: 'SLICED_TOKEN_PREFIX',
           title: 'Anti-Token-Slicing & Concatenation Guard',
-          desc: 'Detects attempts to bypass Push Protection / Gitleaks scanners by splitting token prefixes in source code (e.g. "ghp_" + "abc..." or ["npm", "_"].join("")).'
+          desc: 'Detects attempts to bypass Push Protection / Gitleaks scanners by splitting token prefixes in source code (e.g. concatenating ghp_… / npm_… prefixes or joining character arrays).'
         },
         {
           ruleId: 'SECRET_LOG_SLICING',
           title: 'CI Runner Log Mask-Bypass Guard',
-          desc: 'Gitea Actions (act_runner) and GitHub Actions only mask the exact full secret string as ***. Calling TOKEN.slice(0, 8) bypasses log masking and prints plaintext key fragments — blocked automatically.'
+          desc: 'Gitea Actions (act_runner) and GitHub Actions only mask the exact full secret string as ***. Calling <TOKEN>.slice(0, 8) bypasses log masking and prints plaintext key fragments — blocked automatically.'
         },
         {
           ruleId: 'LOCAL_HOST_PATH',
