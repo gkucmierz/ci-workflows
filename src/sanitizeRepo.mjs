@@ -32,7 +32,17 @@ const FORBIDDEN_RULES = [
   }
 ]
 
-const IGNORED_DIRS = new Set(['.git', 'node_modules', 'dist', '.tmp', 'tmp', 'coverage'])
+const IGNORED_DIRS = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  '.tmp',
+  'tmp',
+  'coverage',
+  '.agents',
+  '.agent',
+  'code-recipes'
+])
 
 const walkDirectoryFallback = (rootDir, currentRel = '', acc = []) => {
   const fullDir = currentRel ? path.join(rootDir, currentRel) : rootDir
@@ -93,12 +103,14 @@ export const scanRepositoryForLeaks = (rootDir = process.cwd()) => {
       relPath === '.agent' ||
       relPath.startsWith('.agent/') ||
       relPath === 'AGENTS.md' ||
-      relPath === 'agents.md'
+      relPath === 'agents.md' ||
+      relPath === 'code-recipes' ||
+      relPath.startsWith('code-recipes/')
     ) {
       violations.push({
         file: relPath,
         ruleId: 'TRACKED_AGENTS_FILE',
-        message: 'Tracked .agents / AGENTS.md file is forbidden in public repositories'
+        message: 'Tracked .agents / AGENTS.md / code-recipes file is forbidden in repositories'
       })
       continue
     }
