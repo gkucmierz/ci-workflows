@@ -206,6 +206,7 @@ export const waitForAllDependencies = async (
     timeoutMs = 180e3,
     pollIntervalMs = 5e3,
     registryUrl = 'https://registry.npmjs.org',
+    fallbackRegistryUrl = 'https://gitea.7u.pl/api/packages/gkucmierz/npm',
     fetchImpl = globalThis.fetch,
     sleepImpl = (ms) => new Promise((r) => setTimeout(r, ms)),
     logger = console
@@ -225,10 +226,19 @@ export const waitForAllDependencies = async (
     const resolved = []
 
     for (const dep of deps) {
-      const status = await checkPackageAvailability(dep.name, dep.range, {
+      let status = await checkPackageAvailability(dep.name, dep.range, {
         registryUrl,
         fetchImpl
       })
+      if (!status.available && fallbackRegistryUrl && fallbackRegistryUrl !== registryUrl) {
+        const giteaStatus = await checkPackageAvailability(dep.name, dep.range, {
+          registryUrl: fallbackRegistryUrl,
+          fetchImpl
+        })
+        if (giteaStatus.available) {
+          status = giteaStatus
+        }
+      }
       if (status.available) {
         resolved.push({ ...dep, matchedVersion: status.matchedVersion })
       } else {
