@@ -37,47 +37,88 @@ jobs:
       - name: Checkout repository code
         uses: actions/checkout@v4
 
-      - name: Wait for @gkucmierz/* dependencies in NPM registry
+      - name: Wait for @gkucmierz/* dependencies (NPM & Gitea Packages)
         env:
           WAIT_FOR_DEPS_TIMEOUT_SEC: ${{ inputs.wait_timeout_sec }}
         run: |
           node -e '
           const fs = require("fs");
-          const path = require("path");
           const files = ["package.json", "ui/package.json", "server/package.json"].filter(f => fs.existsSync(f));
+          const selfNames = new Set();
           const deps = new Map();
           for (const f of files) {
             const p = JSON.parse(fs.readFileSync(f, "utf8"));
+            if (p.name) selfNames.add(p.name);
             for (const [k, v] of Object.entries({ ...(p.dependencies || {}), ...(p.devDependencies || {}) })) {
-              if (k.startsWith("@gkucmierz/") && !String(v).startsWith("file:")) deps.set(k, String(v).replace(/^[^\d]*/, "").split("-")[0]);
+              if (k.startsWith("@gkucmierz/") && !String(v).startsWith("file:") && !String(v).startsWith("http")) {
+                deps.set(k, String(v).replace(/^[^\d]*/, "").split("-")[0]);
+              }
             }
           }
+          for (const s of selfNames) deps.delete(s);
           const cmp = (a, b) => {
             const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
             for (let i = 0; i < 3; i++) if ((pa[i]||0) !== (pb[i]||0)) return (pa[i]||0) - (pb[i]||0);
             return 0;
           };
+          const queryReg = async (baseUrl, name, minVer) => {
+            try {
+              const res = await fetch(baseUrl + name.replace("/", "%2f") + "?t=" + Date.now(), { headers: { "Cache-Control": "no-cache" } });
+              if (!res.ok) return null;
+              const data = await res.json();
+              const vers = Object.keys(data.versions || {}).filter(v => cmp(v, minVer) >= 0).sort(cmp);
+              if (vers.length === 0) return null;
+              const latest = vers[vers.length - 1];
+              const tarball = data.versions?.[latest]?.dist?.tarball || null;
+              return { version: latest, tarball };
+            } catch {
+              return null;
+            }
+          };
           (async () => {
             const deadline = Date.now() + (Number(process.env.WAIT_FOR_DEPS_TIMEOUT_SEC || 180) * 1000);
+            const giteaOverrides = new Map();
             for (const [name, minVer] of deps.entries()) {
               while (true) {
-                try {
-                  const res = await fetch("https://registry.npmjs.org/" + name.replace("/", "%2f") + "?t=" + Date.now(), { headers: { "Cache-Control": "no-cache" } });
-                  if (res.ok) {
-                    const data = await res.json();
-                    const vers = Object.keys(data.versions || {}).filter(v => cmp(v, minVer) >= 0);
-                    if (vers.length > 0) {
-                      console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny (" + vers[vers.length - 1] + ")");
-                      break;
-                    }
-                  }
-                } catch {}
+                const [npmHit, giteaHit] = await Promise.all([
+                  queryReg("https://registry.npmjs.org/", name, minVer),
+                  queryReg("https://gitea.7u.pl/api/packages/gkucmierz/npm/", name, minVer)
+                ]);
+                if (npmHit) {
+                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w npmjs (" + npmHit.version + ")");
+                  break;
+                }
+                if (giteaHit) {
+                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w Gitea Packages (" + giteaHit.version + ")");
+                  if (giteaHit.tarball) giteaOverrides.set(name, giteaHit.tarball);
+                  break;
+                }
                 if (Date.now() >= deadline) {
-                  console.error("❌ [wait-for-deps] Timeout oczekiwania na " + name + ">=" + minVer);
+                  console.error("❌ [wait-for-deps] Timeout oczekiwania na " + name + ">=" + minVer + " (npmjs + Gitea Packages)");
                   process.exit(1);
                 }
-                console.log("⏳ [wait-for-deps] Czekam 5s na publikację " + name + ">=" + minVer + " w npmjs...");
+                console.log("⏳ [wait-for-deps] Czekam 5s na publikację " + name + ">=" + minVer + " (npmjs / Gitea Packages)...");
                 await new Promise(r => setTimeout(r, 5000));
+              }
+            }
+            if (giteaOverrides.size > 0) {
+              for (const f of files) {
+                const p = JSON.parse(fs.readFileSync(f, "utf8"));
+                let changed = false;
+                for (const [depName, tarballUrl] of giteaOverrides.entries()) {
+                  if (p.dependencies && p.dependencies[depName]) {
+                    p.dependencies[depName] = tarballUrl;
+                    changed = true;
+                  }
+                  if (p.devDependencies && p.devDependencies[depName]) {
+                    p.devDependencies[depName] = tarballUrl;
+                    changed = true;
+                  }
+                }
+                if (changed) {
+                  fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
+                  console.log("🔗 [wait-for-deps] Zmapowano prywatne pakiety Gitea w " + f);
+                }
               }
             }
           })();

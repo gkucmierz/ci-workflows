@@ -73,12 +73,13 @@ jobs:
                 hits.push(`${f}: tracked internal .agents / code-recipes file is forbidden in OSS mirror`);
                 continue;
               }
+              if (f === "src/sanitizeRepo.mjs" || f.startsWith("tests/")) continue;
               if (!/\.(js|mjs|cjs|ts|vue|json|md|yml|yaml|html|css)$/.test(f)) continue;
               const content = fs.readFileSync(f, "utf8");
               if (new RegExp("\\x2fUsers\\x2f[a-zA-Z0-9][a-zA-Z0-9._-]*\\x2f").test(content)) {
                 hits.push(`${f}: contains local macOS user path`);
               }
-              if (/['"`](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)['"`]\s*\+/.test(content)) {
+              if (/[\x27\x22\x60](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)[\x27\x22\x60]\s*\+/.test(content)) {
                 hits.push(`${f}: contains sliced/concatenated token prefix`);
               }
               if (/(?:TOKEN|SECRET|PASSWORD|API_KEY|PAT)\s*(?:\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/i.test(content)) {

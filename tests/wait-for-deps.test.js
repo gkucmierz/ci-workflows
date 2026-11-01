@@ -93,6 +93,7 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
       {
         timeoutMs: 5000,
         pollIntervalMs: 10,
+        fallbackRegistryUrl: null,
         fetchImpl: fakeFetch,
         sleepImpl: async () => {},
         logger: { log: () => {} }
@@ -102,5 +103,92 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     assert.equal(res.ok, true)
     assert.equal(res.attempts, 3)
     assert.equal(res.resolved[0].matchedVersion, '1.2.0')
+  })
+
+  it('resolves immediately from Gitea Packages fallback when npmjs only has an older version', async () => {
+    const fakeFetch = async (url, opts) => {
+      if (opts?.method === 'HEAD') {
+        return { ok: true, status: 200 }
+      }
+      const isGitea = String(url).includes('gitea.7u.pl')
+      const versions = isGitea
+        ? {
+            '1.7.9': { dist: { tarball: 'https://gitea.7u.pl/nano-ui-1.7.9.tgz' } },
+            '1.8.3': { dist: { tarball: 'https://gitea.7u.pl/nano-ui-1.8.3.tgz' } }
+          }
+        : {
+            '1.7.9': { dist: { tarball: 'https://registry.npmjs.org/nano-ui-1.7.9.tgz' } }
+          }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          'dist-tags': { latest: isGitea ? '1.8.3' : '1.7.9' },
+          versions
+        })
+      }
+    }
+
+    const res = await waitForAllDependencies(
+      [{ name: '@gkucmierz/nano-ui', range: '^1.8.3' }],
+      {
+        timeoutMs: 5000,
+        pollIntervalMs: 10,
+        fetchImpl: fakeFetch,
+        sleepImpl: async () => {},
+        logger: { log: () => {} }
+      }
+    )
+
+    assert.equal(res.ok, true)
+    assert.equal(res.attempts, 1)
+    assert.equal(res.resolved[0].matchedVersion, '1.8.3')
+  })
+
+  it('validates bash syntax (bash -n) of all run blocks in reusable workflows and executes OSS Sanitization Gate cleanly', async () => {
+    const { execFileSync } = await import('node:child_process')
+    const rootDir = path.resolve(import.meta.dirname, '..')
+    const workflowFiles = [
+      '.gitea/workflows/publish-package.yml',
+      '.gitea/workflows/git-mirror-sync.yml',
+      '.gitea/workflows/zero-downtime-deploy.yml',
+      '.gitea/workflows/scheduled-container-job.yml',
+      '.gitea/workflows/trigger-downstream.yml',
+      'oss-sanitize-gate/action.yml',
+      'publish-npm-dual/action.yml',
+      'wait-for-deps/action.yml',
+      'zero-downtime-swap/action.yml'
+    ]
+
+    for (const rel of workflowFiles) {
+      const content = fs.readFileSync(path.join(rootDir, rel), 'utf8')
+      const runBlocks = [...content.matchAll(/run:\s*\|\n((?:(?:[ ]{8,}.*|[ ]*)\n?)+)/g)]
+      assert.ok(runBlocks.length > 0, `Expected at least one run block in ${rel}`)
+      for (const match of runBlocks) {
+        const lines = match[1].split('\n')
+        const minIndent = Math.min(
+          ...lines.filter((l) => l.trim().length > 0).map((l) => l.match(/^[ ]*/)[0].length)
+        )
+        const script = lines
+          .map((l) => l.slice(minIndent))
+          .join('\n')
+          .replace(/\$\{\{[^}]+\}\}/g, 'dummy_val')
+        // Verify bash syntax has no unescaped quotes or unexpected tokens
+        execFileSync('bash', ['-n', '-c', script], { encoding: 'utf8' })
+      }
+    }
+
+    // Also execute the first run block (OSS Sanitization Gate) of publish-package.yml in bash
+    const publishYml = fs.readFileSync(path.join(rootDir, '.gitea/workflows/publish-package.yml'), 'utf8')
+    const firstRunMatch = publishYml.match(/run:\s*\|\n((?:[ ]{10,}.*\n?)+)/)
+    const sanitizeScript = firstRunMatch[1]
+      .split('\n')
+      .map((l) => l.slice(10))
+      .join('\n')
+    const out = execFileSync('bash', ['-e', '-c', sanitizeScript], {
+      cwd: rootDir,
+      encoding: 'utf8'
+    })
+    assert.match(out, /\[oss-sanitize-gate\] Clean/)
   })
 })

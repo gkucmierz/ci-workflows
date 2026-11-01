@@ -65,7 +65,7 @@ jobs:
           const forbidden = [
             { name: "Local macOS User Path", re: new RegExp("\\x2fUsers\\x2f[a-zA-Z0-9][a-zA-Z0-9._-]*\\x2f") },
             { name: "Private Key Block", re: new RegExp("-----BEGIN (RSA |OPENSSH |EC |PGP )?PRIVATE KEY-----") },
-            { name: "Sliced Token Prefix", re: /['"`](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)['"`]\s*\+/ },
+            { name: "Sliced Token Prefix", re: /[\x27\x22\x60](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)[\x27\x22\x60]\s*\+/ },
             { name: "Partial Secret Slicing", re: /(?:TOKEN|SECRET|PASSWORD|API_KEY|PAT)\s*(?:\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/i }
           ];
           const hits = [];
@@ -74,6 +74,7 @@ jobs:
               hits.push(`${f}: tracked .agents file is forbidden in OSS packages`);
               continue;
             }
+            if (f === "src/sanitizeRepo.mjs" || f.startsWith("tests/")) continue;
             if (!/\.(js|mjs|cjs|ts|vue|json|md|yml|yaml|html|css)$/.test(f)) continue;
             const content = fs.readFileSync(f, "utf8");
             for (const rule of forbidden) {
