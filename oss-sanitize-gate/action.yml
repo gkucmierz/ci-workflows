@@ -1,0 +1,36 @@
+name: 'OSS Sanitization & Anti-Token-Slicing Gate'
+description: 'Uruchamia testy jednostkowe oraz skaner OPSEC (blokuje ścieżki /Users/<user>/, pliki .agents, klucze PEM, jawne tokeny oraz próby cięcia/obfuskacji tokenów).'
+inputs:
+  working_directory:
+    description: 'Katalog projektu do przeskanowania'
+    required: false
+    default: '.'
+  run_tests:
+    description: 'Czy uruchamiać npm test przed skanem (true/false)'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run Unit Tests (if enabled and configured in package.json)
+      if: ${{ inputs.run_tests == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        node -e '
+        const fs = require("fs");
+        const { execSync } = require("child_process");
+        if (fs.existsSync("package.json")) {
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          if (pkg.scripts && pkg.scripts.test) {
+            console.log("▶ Running npm test...");
+            execSync("npm test", { stdio: "inherit" });
+          }
+        }
+        '
+
+    - name: Execute Anti-Token-Slicing & Host-Path Leak Scanner
+      shell: bash
+      run: |
+        node "${{ github.action_path }}/../bin/sanitize-check.mjs" "${{ inputs.working_directory }}"

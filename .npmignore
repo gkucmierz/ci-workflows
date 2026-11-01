@@ -1,0 +1,22 @@
+# Exclude SPA website source, build output, Docker files, and tests from NPM tarball
+ui/
+dist/
+public/
+tests/
+node_modules/
+index.html
+vite.config.js
+Dockerfile
+docker-compose.yml
+nginx.conf
+.dockerignore
+.gitea/workflows/deploy.yml
+.tmp/
+tmp/
+.env*
+.agents/
+.agent/
+AGENTS.md
+agents.md
+*.log
+.DS_Store

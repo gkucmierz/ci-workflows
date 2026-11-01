@@ -1,7 +1,21 @@
 #!/usr/bin/env node
 import { scanRepositoryForLeaks } from '../src/sanitizeRepo.mjs'
 
-const rootDir = process.argv[2] || process.cwd()
+const args = process.argv.slice(2)
+let rootDir = process.cwd()
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--root' && args[i + 1]) {
+    rootDir = args[i + 1]
+    break
+  } else if (args[i].startsWith('--root=')) {
+    rootDir = args[i].slice('--root='.length)
+    break
+  } else if (!args[i].startsWith('-')) {
+    rootDir = args[i]
+    break
+  }
+}
+
 const result = scanRepositoryForLeaks(rootDir)
 
 if (!result.clean) {

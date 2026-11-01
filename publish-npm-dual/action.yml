@@ -1,0 +1,90 @@
+name: 'Dual-Registry NPM Package Publisher (npmjs.org + Private Gitea/Gitee)'
+description: 'Idempotentna publikacja paczki NPM (weryfikuje czy wersja już istnieje, sprawdza zawartość tarballa przez npm pack --dry-run i publikuje na registry.npmjs.org oraz prywatny rejestr).'
+inputs:
+  working_directory:
+    description: 'Katalog paczki z package.json'
+    required: false
+    default: '.'
+  run_build:
+    description: 'Czy uruchamiać npm run build przed publikacją (true/false)'
+    required: false
+    default: 'false'
+  publish_npmjs:
+    description: 'Publikuj na publicznym registry.npmjs.org (true/false)'
+    required: false
+    default: 'true'
+  publish_private:
+    description: 'Publikuj w prywatnym rejestrze Gitea/Gitee (true/false)'
+    required: false
+    default: 'true'
+  private_registry_url:
+    description: 'URL prywatnego rejestru NPM'
+    required: false
+    default: 'https://gitea.7u.pl/api/packages/gkucmierz/npm/'
+  npm_token:
+    description: 'Token autoryzacyjny do registry.npmjs.org'
+    required: false
+    default: ''
+  private_token:
+    description: 'Token autoryzacyjny do prywatnego rejestru'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build Package (if enabled) & Inspect Clean Tarball
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        RUN_BUILD: ${{ inputs.run_build }}
+      run: |
+        if [ "$RUN_BUILD" = "true" ]; then
+          node -e '
+          const fs = require("fs");
+          const { execSync } = require("child_process");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          if (pkg.scripts && pkg.scripts.build) {
+            execSync(fs.existsSync("package-lock.json") ? "npm ci" : "npm install", { stdio: "inherit" });
+            execSync("npm run build", { stdio: "inherit" });
+          }
+          '
+        fi
+        npm pack --dry-run
+
+    - name: Publish to Public NPM Registry (registry.npmjs.org)
+      if: ${{ inputs.publish_npmjs == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        NODE_AUTH_TOKEN: ${{ inputs.npm_token }}
+      run: |
+        if [ -z "$NODE_AUTH_TOKEN" ]; then
+          echo "⚠️ npm_token is empty, skipping registry.npmjs.org publish."
+          exit 0
+        fi
+        NAME=$(node -p "require('./package.json').name")
+        VER=$(node -p "require('./package.json').version")
+        EXISTS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/${NAME/\//%2f}/${VER}")
+        if [ "$EXISTS" = "200" ]; then
+          echo "ℹ️ ${NAME}@${VER} is already published on registry.npmjs.org — skipping."
+          exit 0
+        fi
+        npm config set "//registry.npmjs.org/:_authToken" "$NODE_AUTH_TOKEN"
+        npm publish --registry="https://registry.npmjs.org" --access public
+
+    - name: Publish to Private Registry (Gitea / Gitee)
+      if: ${{ inputs.publish_private == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        NODE_AUTH_TOKEN: ${{ inputs.private_token }}
+        PRIVATE_REGISTRY: ${{ inputs.private_registry_url }}
+      run: |
+        if [ -z "$NODE_AUTH_TOKEN" ]; then
+          echo "⚠️ private_token is empty, skipping private registry publish."
+          exit 0
+        fi
+        REG_HOST=$(echo "$PRIVATE_REGISTRY" | sed -E 's|^https?://||')
+        npm config set "//${REG_HOST}:_authToken" "$NODE_AUTH_TOKEN"
+        npm publish --registry="$PRIVATE_REGISTRY" || echo "ℹ️ Version already exists in private registry, skipping."

@@ -8,6 +8,10 @@ inputs:
     description: 'Czy wykonywać atomowy hot-swap /usr/share/nginx/html dla kontenerów statycznych Nginx (true/false)'
     required: false
     default: 'true'
+  healthcheck_url:
+    description: 'Opcjonalny URL lokalnego smoke-testu HTTP po wdrożeniu (np. http://localhost:30172/)'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -43,3 +47,23 @@ runs:
         for npm_cid in $(docker ps -q --filter "ancestor=jc21/nginx-proxy-manager" --filter "status=running"); do
           docker exec "$npm_cid" nginx -s reload 2>/dev/null || true
         done
+
+        if [ -n "${{ inputs.healthcheck_url }}" ]; then
+          URL="${{ inputs.healthcheck_url }}"
+          echo "🔍 Smoke-testing $URL ..."
+          OK=0
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "301" ] || [ "$STATUS" = "302" ]; then
+              echo "✅ Smoke test passed ($URL -> HTTP $STATUS)"
+              OK=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$OK" != "1" ]; then
+            echo "❌ Smoke test failed for $URL"
+            docker logs "$CONTAINER" --tail 40 || true
+            exit 1
+          fi
+        fi

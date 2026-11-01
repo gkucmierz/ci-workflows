@@ -1,0 +1,37 @@
+name: Build SPA, Publish Package (Gitea + NPM) & Zero-Downtime Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  release_and_deploy:
+    name: Sanitize, Dual-Publish NPM & Zero-Downtime Deploy (ci.7u.pl)
+    runs-on: self-hosted-pl
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Run Unit Tests & Anti-Token-Slicing OPSEC Gate
+        uses: ./oss-sanitize-gate
+        with:
+          run_tests: 'true'
+
+      - name: Dual-Publish Package (registry.npmjs.org + Gitea Packages)
+        uses: ./publish-npm-dual
+        with:
+          run_build: 'false'
+          publish_npmjs: 'true'
+          publish_private: 'true'
+          npm_token: ${{ secrets.NPM_AUTH_TOKEN }}
+          private_token: ${{ secrets.LOCAL_PACKAGE_REGISTRY }}
+
+      - name: Zero-Downtime SPA Build & Nginx Hot-Swap (ci.7u.pl)
+        uses: ./zero-downtime-swap
+        with:
+          container_name: ci-workflows
+          hot_swap_static: 'true'
+          healthcheck_url: 'http://localhost:30172/'

@@ -1,25 +1,59 @@
 {
   "name": "@gkucmierz/ci-workflows",
   "version": "1.0.0",
-  "description": "Reusable Gitea Actions, Composite Actions (wait-for-deps, zero-downtime-swap) and Workflow Templates for the 7u.pl Ecosystem",
+  "description": "Deterministic Reusable Gitea/GitHub Actions, Zero-Downtime Docker Swap, Dependency Readiness Gate (wait-for-deps) & Anti-Token-Slicing OPSEC Scanner",
   "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./wait-for-deps": "./src/waitForDeps.mjs",
+    "./sanitize": "./src/sanitizeRepo.mjs"
+  },
   "bin": {
     "wait-for-deps": "./bin/wait-for-deps.mjs",
     "oss-sanitize-check": "./bin/sanitize-check.mjs"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "wait-for-deps/",
+    "zero-downtime-swap/",
+    "oss-sanitize-gate/",
+    "publish-npm-dual/",
+    ".gitea/workflows/zero-downtime-deploy.yml",
+    ".gitea/workflows/publish-package.yml",
+    ".gitea/workflows/git-mirror-sync.yml",
+    ".gitea/workflows/scheduled-container-job.yml",
+    ".gitea/workflows/trigger-downstream.yml",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "dev": "vite --port 30172 --host",
+    "build": "vite build",
+    "preview": "vite preview --port 30172 --host",
     "test": "node --test tests/*.test.js",
     "wait-for-deps": "node ./bin/wait-for-deps.mjs",
     "sanitize": "node ./bin/sanitize-check.mjs"
   },
+  "devDependencies": {
+    "@gkucmierz/nano-ui": "^1.7.9",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.2.0",
+    "vue": "^3.5.13"
+  },
   "keywords": [
     "gitea-actions",
+    "github-actions",
     "ci-cd",
     "zero-downtime",
     "dependency-gate",
-    "7u.pl"
+    "wait-for-deps",
+    "opsec",
+    "secret-scanner"
   ],
   "author": "Grzegorz Kućmierz",
-  "license": "UNLICENSED",
-  "private": true
+  "license": "MIT"
 }

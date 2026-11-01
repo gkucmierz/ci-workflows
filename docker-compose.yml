@@ -1,0 +1,24 @@
+name: ci-workflows
+
+services:
+  ci-workflows:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ci-workflows
+    restart: unless-stopped
+    ports:
+      - "30172:80"
+    expose:
+      - "80"
+    networks:
+      npm_public:
+        aliases:
+          - ci-workflows
+          - ci-hub
+          - ci
+
+networks:
+  npm_public:
+    external: true
+    name: npm_public
