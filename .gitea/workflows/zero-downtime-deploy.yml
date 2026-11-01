@@ -102,42 +102,22 @@ jobs:
               }
             }
             if (giteaOverrides.size > 0) {
-              const path = require("path");
-              const regLine = "@gkucmierz:registry=https://gitea.7u.pl/api/packages/gkucmierz/npm/";
               for (const f of files) {
-                const dir = path.dirname(f);
-                const npmrcPath = path.join(dir, ".npmrc");
-                const existingNpmrc = fs.existsSync(npmrcPath) ? fs.readFileSync(npmrcPath, "utf8") : "";
-                if (!existingNpmrc.includes("@gkucmierz:registry=")) {
-                  fs.writeFileSync(npmrcPath, (existingNpmrc ? existingNpmrc.trimEnd() + "\n" : "") + regLine + "\n");
-                  console.log("🔗 [wait-for-deps] Dodano @gkucmierz:registry do " + npmrcPath);
-                }
-                const hasLock = fs.existsSync(path.join(dir, "package-lock.json"));
-                if (!hasLock) {
-                  const p = JSON.parse(fs.readFileSync(f, "utf8"));
-                  let changed = false;
-                  for (const [depName, tarballUrl] of giteaOverrides.entries()) {
-                    if (p.dependencies && p.dependencies[depName]) {
-                      p.dependencies[depName] = tarballUrl;
-                      changed = true;
-                    }
-                    if (p.devDependencies && p.devDependencies[depName]) {
-                      p.devDependencies[depName] = tarballUrl;
-                      changed = true;
-                    }
+                const p = JSON.parse(fs.readFileSync(f, "utf8"));
+                let changed = false;
+                for (const [depName, tarballUrl] of giteaOverrides.entries()) {
+                  if (p.dependencies && p.dependencies[depName]) {
+                    p.dependencies[depName] = tarballUrl;
+                    changed = true;
                   }
-                  if (changed) {
-                    fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
-                    console.log("🔗 [wait-for-deps] Zmapowano prywatne pakiety Gitea w " + f);
+                  if (p.devDependencies && p.devDependencies[depName]) {
+                    p.devDependencies[depName] = tarballUrl;
+                    changed = true;
                   }
                 }
-              }
-              if (fs.existsSync("Dockerfile")) {
-                const df = fs.readFileSync("Dockerfile", "utf8");
-                const patched = df.replace(/COPY\s+package\*\.json\s+\.\/(\s*)$/gm, "COPY package*.json .npmrc* ./$1");
-                if (patched !== df) {
-                  fs.writeFileSync("Dockerfile", patched);
-                  console.log("🔗 [wait-for-deps] Upewniono się, że Dockerfile kopiuje .npmrc*");
+                if (changed) {
+                  fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
+                  console.log("🔗 [wait-for-deps] Zmapowano prywatne pakiety Gitea w " + f);
                 }
               }
             }

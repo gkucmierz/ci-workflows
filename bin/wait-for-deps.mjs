@@ -10,26 +10,36 @@ const scopePrefix = process.env.WAIT_FOR_DEPS_SCOPE || '@gkucmierz/'
 
 const main = async () => {
   const deps = extractScopedDependencies(rootDir, scopePrefix)
-  await waitForAllDependencies(deps, {
+  const res = await waitForAllDependencies(deps, {
     timeoutMs: timeoutSec * 1000,
     pollIntervalMs: intervalSec * 1000
   })
 
-  if (deps.length > 0) {
-    const regLine = '@gkucmierz:registry=https://gitea.7u.pl/api/packages/gkucmierz/npm/'
-    const npmrcPath = path.join(rootDir, '.npmrc')
-    const existing = fs.existsSync(npmrcPath) ? fs.readFileSync(npmrcPath, 'utf8') : ''
-    if (!existing.includes('@gkucmierz:registry=')) {
-      fs.writeFileSync(npmrcPath, (existing ? existing.trimEnd() + '\n' : '') + regLine + '\n')
-      console.log(`🔗 [wait-for-deps] Added @gkucmierz:registry to ${npmrcPath}`)
-    }
-    const dfPath = path.join(rootDir, 'Dockerfile')
-    if (fs.existsSync(dfPath)) {
-      const df = fs.readFileSync(dfPath, 'utf8')
-      const patched = df.replace(/COPY\s+package\*\.json\s+\.\/(\s*)$/gm, 'COPY package*.json .npmrc* ./$1')
-      if (patched !== df) {
-        fs.writeFileSync(dfPath, patched)
-        console.log('🔗 [wait-for-deps] Patched Dockerfile to copy .npmrc*')
+  const fallbackDeps = (res.resolved || []).filter((r) => r.source === 'fallback' && r.tarballUrl)
+  if (fallbackDeps.length > 0) {
+    const candidateFiles = [
+      'package.json',
+      'ui/package.json',
+      'server/package.json',
+      'crawler/package.json'
+    ].map((rel) => path.join(rootDir, rel)).filter((p) => fs.existsSync(p))
+
+    for (const file of candidateFiles) {
+      const pkg = JSON.parse(fs.readFileSync(file, 'utf8'))
+      let changed = false
+      for (const item of fallbackDeps) {
+        if (pkg.dependencies && pkg.dependencies[item.name]) {
+          pkg.dependencies[item.name] = item.tarballUrl
+          changed = true
+        }
+        if (pkg.devDependencies && pkg.devDependencies[item.name]) {
+          pkg.devDependencies[item.name] = item.tarballUrl
+          changed = true
+        }
+      }
+      if (changed) {
+        fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n')
+        console.log(`🔗 [wait-for-deps] Zmapowano pakiety Gitea (${fallbackDeps.map((d) => d.name).join(', ')}) bezpośrednio na tarball URL w ${file}`)
       }
     }
   }

@@ -105,12 +105,13 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     assert.equal(res.resolved[0].matchedVersion, '1.2.0')
   })
 
-  it('resolves immediately from Gitea Packages fallback when npmjs only has an older version', async () => {
+  it('resolves immediately from Gitea Packages fallback when npmjs only has an older version (even when Gitea returns HTTP 405 on HEAD)', async () => {
     const fakeFetch = async (url, opts) => {
-      if (opts?.method === 'HEAD') {
-        return { ok: true, status: 200 }
-      }
       const isGitea = String(url).includes('gitea.7u.pl')
+      if (opts?.method === 'HEAD') {
+        // Real Gitea NPM Packages registry returns 405 Method Not Allowed on HEAD for .tgz tarballs
+        return { ok: !isGitea, status: isGitea ? 405 : 200 }
+      }
       const versions = isGitea
         ? {
             '1.7.9': { dist: { tarball: 'https://gitea.7u.pl/nano-ui-1.7.9.tgz' } },
