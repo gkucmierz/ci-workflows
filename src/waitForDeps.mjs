@@ -170,7 +170,7 @@ export const checkPackageAvailability = async (
 
     if (tarballUrl) {
       const headRes = await fetchImpl(tarballUrl, { method: 'HEAD' })
-      if (!headRes.ok) {
+      if (!headRes.ok && headRes.status !== 405) {
         return {
           available: false,
           matchedVersion: bestMatch,
@@ -184,6 +184,7 @@ export const checkPackageAvailability = async (
       available: true,
       matchedVersion: bestMatch,
       latestVersion,
+      tarballUrl: tarballUrl || null,
       reason: 'OK'
     }
   } catch (err) {
@@ -191,6 +192,7 @@ export const checkPackageAvailability = async (
       available: false,
       matchedVersion: null,
       latestVersion: null,
+      tarballUrl: null,
       reason: err?.message || String(err)
     }
   }
@@ -230,6 +232,7 @@ export const waitForAllDependencies = async (
         registryUrl,
         fetchImpl
       })
+      let source = 'npmjs'
       if (!status.available && fallbackRegistryUrl && fallbackRegistryUrl !== registryUrl) {
         const giteaStatus = await checkPackageAvailability(dep.name, dep.range, {
           registryUrl: fallbackRegistryUrl,
@@ -237,10 +240,21 @@ export const waitForAllDependencies = async (
         })
         if (giteaStatus.available) {
           status = giteaStatus
+          source = 'fallback'
+        } else {
+          status = {
+            ...status,
+            reason: `npmjs: ${status.reason} | gitea: ${giteaStatus.reason}`
+          }
         }
       }
       if (status.available) {
-        resolved.push({ ...dep, matchedVersion: status.matchedVersion })
+        resolved.push({
+          ...dep,
+          matchedVersion: status.matchedVersion,
+          tarballUrl: status.tarballUrl || null,
+          source
+        })
       } else {
         pending.push({ ...dep, ...status })
       }
@@ -248,7 +262,8 @@ export const waitForAllDependencies = async (
 
     if (pending.length === 0) {
       for (const r of resolved) {
-        logger.log(`✅ [wait-for-deps] ${r.name}@${r.range} -> dostępny (${r.matchedVersion})`)
+        const regLabel = r.source === 'fallback' ? 'Gitea Packages' : 'npmjs.org'
+        logger.log(`✅ [wait-for-deps] ${r.name}@${r.range} -> dostępny w ${regLabel} (${r.matchedVersion})`)
       }
       return { ok: true, resolved, attempts: attempt }
     }
