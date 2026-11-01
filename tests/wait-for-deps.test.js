@@ -145,8 +145,9 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     assert.equal(res.resolved[0].matchedVersion, '1.8.3')
   })
 
-  it('validates bash syntax (bash -n) of all run blocks in reusable workflows and executes OSS Sanitization Gate cleanly', async () => {
-    const { execFileSync } = await import('node:child_process')
+  it('validates shell syntax (-n) of all run blocks in reusable workflows and executes OSS Sanitization Gate cleanly (including inside node:22-alpine without bash)', async () => {
+    const { execFileSync, spawnSync } = await import('node:child_process')
+    const shellBin = spawnSync('bash', ['--version']).status === 0 ? 'bash' : 'sh'
     const rootDir = path.resolve(import.meta.dirname, '..')
     const workflowFiles = [
       '.gitea/workflows/publish-package.yml',
@@ -173,19 +174,19 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
           .map((l) => l.slice(minIndent))
           .join('\n')
           .replace(/\$\{\{[^}]+\}\}/g, 'dummy_val')
-        // Verify bash syntax has no unescaped quotes or unexpected tokens
-        execFileSync('bash', ['-n', '-c', script], { encoding: 'utf8' })
+        // Verify shell syntax has no unescaped quotes or unexpected tokens
+        execFileSync(shellBin, ['-n', '-c', script], { encoding: 'utf8' })
       }
     }
 
-    // Also execute the first run block (OSS Sanitization Gate) of publish-package.yml in bash
+    // Also execute the first run block (OSS Sanitization Gate) of publish-package.yml
     const publishYml = fs.readFileSync(path.join(rootDir, '.gitea/workflows/publish-package.yml'), 'utf8')
     const firstRunMatch = publishYml.match(/run:\s*\|\n((?:[ ]{10,}.*\n?)+)/)
     const sanitizeScript = firstRunMatch[1]
       .split('\n')
       .map((l) => l.slice(10))
       .join('\n')
-    const out = execFileSync('bash', ['-e', '-c', sanitizeScript], {
+    const out = execFileSync(shellBin, ['-e', '-c', sanitizeScript], {
       cwd: rootDir,
       encoding: 'utf8'
     })

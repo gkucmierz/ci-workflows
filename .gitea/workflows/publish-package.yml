@@ -60,8 +60,22 @@ jobs:
         run: |
           node -e '
           const { execFileSync } = require("child_process");
-          const files = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
           const fs = require("fs");
+          const path = require("path");
+          let files = [];
+          try {
+            files = execFileSync("git", ["ls-files"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).split("\n").filter(Boolean);
+          } catch {
+            const walk = (d, pre = "") => {
+              for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+                if ([".git", "node_modules", "dist", "coverage"].includes(e.name)) continue;
+                const rel = pre ? `${pre}/${e.name}` : e.name;
+                if (e.isDirectory()) walk(path.join(d, e.name), rel);
+                else if (e.isFile()) files.push(rel);
+              }
+            };
+            walk(process.cwd());
+          }
           const forbidden = [
             { name: "Local macOS User Path", re: new RegExp("\\x2fUsers\\x2f[a-zA-Z0-9][a-zA-Z0-9._-]*\\x2f") },
             { name: "Private Key Block", re: new RegExp("-----BEGIN (RSA |OPENSSH |EC |PGP )?PRIVATE KEY-----") },
