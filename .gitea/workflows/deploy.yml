@@ -35,3 +35,13 @@ jobs:
           container_name: ci-workflows
           hot_swap_static: 'true'
           healthcheck_url: 'http://localhost:30172/'
+
+      - name: Refresh act_runner cache for ci-workflows on runner host
+        if: always()
+        run: |
+          for d in /root/.cache/act/*; do
+            if [ -d "$d/.git" ] && git -C "$d" remote -v 2>/dev/null | grep -q "ci-workflows"; then
+              echo "🧹 Purging cached ci-workflows action dir: $d"
+              rm -rf "$d" || true
+            fi
+          done

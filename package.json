@@ -39,7 +39,7 @@
     "sanitize": "node ./bin/sanitize-check.mjs"
   },
   "devDependencies": {
-    "@gkucmierz/nano-ui": "^1.7.9",
+    "@gkucmierz/nano-ui": "^1.8.3",
     "@vitejs/plugin-vue": "^5.2.1",
     "vite": "^6.2.0",
     "vue": "^3.5.13",
