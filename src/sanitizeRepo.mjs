@@ -23,7 +23,7 @@ const FORBIDDEN_RULES = [
   {
     id: 'SLICED_TOKEN_PREFIX',
     name: 'Sliced / Concatenated Token Prefix (Anti-Token-Slicing Guard)',
-    re: /['"`](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)['"`]\s*\+|\[\s*['"`](?:ghp|npm|glpat)['"`]\s*,/
+    re: /['"`](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)['"`]\s*\+|\[\s*['"`](?:ghp_|github_pat_|npm_|glpat-|ghp|npm|glpat)['"`]\s*,\s*['"`]_/
   },
   {
     id: 'SECRET_LOG_SLICING',
