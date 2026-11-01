@@ -18,5 +18,6 @@ tmp/
 .agent/
 AGENTS.md
 agents.md
+code-recipes/
 *.log
 .DS_Store

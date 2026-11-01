@@ -41,36 +41,56 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: OSS Sanitization Gate
+      - name: Dual-SSoT Privacy & OSS Sanitization Gate
         if: ${{ inputs.oss_sanitize_check }}
         run: |
           node -e '
           const { execFileSync } = require("child_process");
           const fs = require("fs");
-          const files = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
-          const hits = [];
-          for (const f of files) {
-            if (f.startsWith(".agents/") || f.startsWith(".agent/")) {
-              hits.push(`${f}: tracked .agents file is forbidden in OSS mirror`);
-              continue;
+          (async () => {
+            if (fs.existsSync("package.json")) {
+              const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              const lic = String(pkg.license || "").trim().toUpperCase();
+              if (pkg.private === true || !lic || lic === "UNLICENSED" || lic === "PROPRIETARY") {
+                console.error(`❌ [Privacy Gate] Mirror aborted: package.json declares private=${Boolean(pkg.private)} license="${pkg.license || "NONE"}". Private repos cannot be mirrored externally.`);
+                process.exit(1);
+              }
             }
-            if (!/\.(js|mjs|cjs|ts|vue|json|md|yml|yaml|html|css)$/.test(f)) continue;
-            const content = fs.readFileSync(f, "utf8");
-            if (new RegExp("\\x2fUsers\\x2f[a-zA-Z0-9][a-zA-Z0-9._-]*\\x2f").test(content)) {
-              hits.push(`${f}: contains local macOS user path`);
+            const repoFull = process.env.GITHUB_REPOSITORY || "";
+            if (repoFull.includes("/")) {
+              try {
+                const res = await fetch(`https://gitea.7u.pl/api/v1/repos/${repoFull}`);
+                if (res.status !== 200) {
+                  console.error(`❌ [Privacy Gate] Mirror aborted: Repository ${repoFull} is PRIVATE on Gitea (HTTP ${res.status}).`);
+                  process.exit(1);
+                }
+              } catch {}
             }
-            if (/['"`](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)['"`]\s*\+/.test(content)) {
-              hits.push(`${f}: contains sliced/concatenated token prefix`);
+            const files = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
+            const hits = [];
+            for (const f of files) {
+              if (f.startsWith(".agents/") || f.startsWith(".agent/") || f === "AGENTS.md" || f === "agents.md" || f.startsWith("code-recipes/")) {
+                hits.push(`${f}: tracked internal .agents / code-recipes file is forbidden in OSS mirror`);
+                continue;
+              }
+              if (!/\.(js|mjs|cjs|ts|vue|json|md|yml|yaml|html|css)$/.test(f)) continue;
+              const content = fs.readFileSync(f, "utf8");
+              if (new RegExp("\\x2fUsers\\x2f[a-zA-Z0-9][a-zA-Z0-9._-]*\\x2f").test(content)) {
+                hits.push(`${f}: contains local macOS user path`);
+              }
+              if (/['"`](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)['"`]\s*\+/.test(content)) {
+                hits.push(`${f}: contains sliced/concatenated token prefix`);
+              }
+              if (/(?:TOKEN|SECRET|PASSWORD|API_KEY|PAT)\s*(?:\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/i.test(content)) {
+                hits.push(`${f}: contains partial secret slicing / mask bypass`);
+              }
             }
-            if (/(?:TOKEN|SECRET|PASSWORD|API_KEY|PAT)\s*(?:\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/i.test(content)) {
-              hits.push(`${f}: contains partial secret slicing / mask bypass`);
+            if (hits.length > 0) {
+              console.error("❌ [oss-sanitize-gate] Mirror aborted due to sensitive files/paths:\n" + hits.join("\n"));
+              process.exit(1);
             }
-          }
-          if (hits.length > 0) {
-            console.error("❌ [oss-sanitize-gate] Mirror aborted due to sensitive files/paths:\n" + hits.join("\n"));
-            process.exit(1);
-          }
-          console.log("✅ [oss-sanitize-gate] Repository verified clean for public mirror.");
+            console.log("✅ [oss-sanitize-gate] Repository verified public & clean for external mirror.");
+          })();
           '
 
       - name: Push branch and tags to target Git remote

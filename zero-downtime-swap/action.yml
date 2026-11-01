@@ -12,15 +12,31 @@ inputs:
     description: 'Opcjonalny URL lokalnego smoke-testu HTTP po wdrożeniu (np. http://localhost:30172/)'
     required: false
     default: ''
+  private_registry_token:
+    description: 'Opcjonalny token odczytu prywatnych paczek z Gitea Packages podczas docker compose build'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
   steps:
     - name: Build and Deploy with Zero-Downtime
       shell: bash
+      env:
+        PRIVATE_REG_TOKEN: ${{ inputs.private_registry_token }}
       run: |
         CONTAINER="${{ inputs.container_name }}"
         HOT_SWAP="${{ inputs.hot_swap_static }}"
+
+        if [ -n "$PRIVATE_REG_TOKEN" ]; then
+          if [ -f .npmrc ]; then
+            cp .npmrc .npmrc.bak
+            trap 'mv -f .npmrc.bak .npmrc' EXIT
+          else
+            trap 'rm -f .npmrc' EXIT
+          fi
+          printf "\n//gitea.7u.pl/api/packages/gkucmierz/npm/:_authToken=%s\n" "$PRIVATE_REG_TOKEN" >> .npmrc
+        fi
 
         docker compose build
 
