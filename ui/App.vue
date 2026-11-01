@@ -1,12 +1,29 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { NanoSwitch } from '@gkucmierz/nano-ui'
+import { NanoSwitch, NanoSelect } from '@gkucmierz/nano-ui'
 import pkg from '../package.json'
 
 const appVersion = pkg.version || '1.0.0'
 const lang = ref('pl')
 const activeArchetypeId = ref('zero-downtime-deploy')
 const copiedKey = ref('')
+
+const runsOnOptions = [
+  {
+    value: 'self-hosted-pl',
+    labelPl: 'self-hosted-pl (Węzeł PL)',
+    labelEn: 'self-hosted-pl (PL Node)',
+    badge: 'PL',
+    color: '#10b981'
+  },
+  {
+    value: 'self-hosted-de',
+    labelPl: 'self-hosted-de (Węzeł DE)',
+    labelEn: 'self-hosted-de (DE Node)',
+    badge: 'DE',
+    color: '#38bdf8'
+  }
+]
 
 // Interactive configurator state
 const cfg = ref({
@@ -674,13 +691,16 @@ async function copyText(text, key) {
                   <span>container_name</span>
                   <input v-model="cfg.containerName" type="text" class="field-input" />
                 </label>
-                <label class="field-label">
+                <div class="field-label">
                   <span>runs_on</span>
-                  <select v-model="cfg.runsOn" class="field-input">
-                    <option value="self-hosted-pl">self-hosted-pl (Węzeł PL)</option>
-                    <option value="self-hosted-de">self-hosted-de (Węzeł DE)</option>
-                  </select>
-                </label>
+                  <NanoSelect
+                    v-model="cfg.runsOn"
+                    :options="runsOnOptions"
+                    :searchable="false"
+                    size="sm"
+                    :lang="lang"
+                  />
+                </div>
                 <label class="field-label">
                   <span>healthcheck_url (Smoke Test)</span>
                   <input v-model="cfg.healthcheckUrl" type="text" class="field-input" />
@@ -700,13 +720,16 @@ async function copyText(text, key) {
               </div>
 
               <div v-else-if="activeArchetypeId === 'publish-package'" class="form-fields">
-                <label class="field-label">
+                <div class="field-label">
                   <span>runs_on</span>
-                  <select v-model="cfg.runsOn" class="field-input">
-                    <option value="self-hosted-pl">self-hosted-pl</option>
-                    <option value="self-hosted-de">self-hosted-de</option>
-                  </select>
-                </label>
+                  <NanoSelect
+                    v-model="cfg.runsOn"
+                    :options="runsOnOptions"
+                    :searchable="false"
+                    size="sm"
+                    :lang="lang"
+                  />
+                </div>
                 <div class="field-switch-row field-switch-master">
                   <NanoSwitch
                     :model-value="publishGatesAllOn"
@@ -768,6 +791,16 @@ async function copyText(text, key) {
                   <span>target_branch</span>
                   <input v-model="cfg.targetBranch" type="text" class="field-input" />
                 </label>
+                <div class="field-label">
+                  <span>runs_on</span>
+                  <NanoSelect
+                    v-model="cfg.runsOn"
+                    :options="runsOnOptions"
+                    :searchable="false"
+                    size="sm"
+                    :lang="lang"
+                  />
+                </div>
                 <div class="field-switch-row">
                   <NanoSwitch
                     v-model="cfg.ossSanitizeCheck"
@@ -787,6 +820,16 @@ async function copyText(text, key) {
                   <span>container_name</span>
                   <input v-model="cfg.containerName" type="text" class="field-input" />
                 </label>
+                <div class="field-label">
+                  <span>runs_on</span>
+                  <NanoSelect
+                    v-model="cfg.runsOn"
+                    :options="runsOnOptions"
+                    :searchable="false"
+                    size="sm"
+                    :lang="lang"
+                  />
+                </div>
                 <label class="field-label">
                   <span>command_scheduled</span>
                   <input v-model="cfg.commandScheduled" type="text" class="field-input" />
@@ -806,6 +849,16 @@ async function copyText(text, key) {
                   <span>workflow_file</span>
                   <input v-model="cfg.workflowFile" type="text" class="field-input" />
                 </label>
+                <div class="field-label">
+                  <span>runs_on</span>
+                  <NanoSelect
+                    v-model="cfg.runsOn"
+                    :options="runsOnOptions"
+                    :searchable="false"
+                    size="sm"
+                    :lang="lang"
+                  />
+                </div>
               </div>
             </div>
           </div>
