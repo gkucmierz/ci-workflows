@@ -32,22 +32,57 @@ const FORBIDDEN_RULES = [
   }
 ]
 
+const IGNORED_DIRS = new Set(['.git', 'node_modules', 'dist', '.tmp', 'tmp', 'coverage'])
+
+const walkDirectoryFallback = (rootDir, currentRel = '', acc = []) => {
+  const fullDir = currentRel ? path.join(rootDir, currentRel) : rootDir
+  let entries = []
+  try {
+    entries = fs.readdirSync(fullDir, { withFileTypes: true })
+  } catch {
+    return acc
+  }
+  for (const entry of entries) {
+    if (IGNORED_DIRS.has(entry.name)) continue
+    const relPath = currentRel ? `${currentRel}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      walkDirectoryFallback(rootDir, relPath, acc)
+    } else if (entry.isFile()) {
+      acc.push(relPath)
+    }
+  }
+  return acc
+}
+
+const listFilesToScan = (rootDir) => {
+  if (fs.existsSync(path.join(rootDir, '.git'))) {
+    try {
+      return execFileSync(
+        'git',
+        ['ls-files', '--cached', '--others', '--exclude-standard'],
+        {
+          cwd: rootDir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore']
+        }
+      )
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    } catch {
+      // Fallback to pure fs walk when `git` binary is unavailable (e.g. inside node:22-alpine Docker build)
+    }
+  }
+  return walkDirectoryFallback(rootDir)
+}
+
 /**
- * Scans git-tracked files in `rootDir` for OPSEC leaks, hardcoded secrets,
- * and token-slicing / obfuscation patterns.
+ * Scans repository files in `rootDir` for OPSEC leaks, hardcoded secrets,
+ * and token-slicing / obfuscation patterns. Works both in Git checkouts and
+ * inside minimal Docker build contexts (`node:22-alpine`) without `git`.
  */
 export const scanRepositoryForLeaks = (rootDir = process.cwd()) => {
-  const tracked = execFileSync(
-    'git',
-    ['ls-files', '--cached', '--others', '--exclude-standard'],
-    {
-      cwd: rootDir,
-      encoding: 'utf8'
-    }
-  )
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean)
+  const tracked = listFilesToScan(rootDir)
 
   const violations = []
 
