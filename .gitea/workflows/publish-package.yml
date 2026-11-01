@@ -1,0 +1,144 @@
+name: Reusable Package Test, Sanitize & Dual Registry Publish (npmjs + Gitea/Private)
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: 'Etykieta runnera Gitea (domyślnie self-hosted-pl)'
+        required: false
+        type: string
+        default: 'self-hosted-pl'
+      run_tests:
+        description: 'Uruchamiaj npm test przed publikacją (jeśli zdefiniowano w package.json)'
+        required: false
+        type: boolean
+        default: true
+      run_build:
+        description: 'Uruchamiaj npm run build przed publikacją (jeśli zdefiniowano w package.json)'
+        required: false
+        type: boolean
+        default: true
+      publish_npmjs:
+        description: 'Publikuj w publicznym rejestrze https://registry.npmjs.org'
+        required: false
+        type: boolean
+        default: true
+      publish_private:
+        description: 'Publikuj w prywatnym rejestrze (np. Gitea Packages / Gitee / Verdaccio)'
+        required: false
+        type: boolean
+        default: true
+      private_registry_url:
+        description: 'URL prywatnego rejestru NPM'
+        required: false
+        type: string
+        default: 'https://gitea.7u.pl/api/packages/gkucmierz/npm/'
+      oss_sanitize_check:
+        description: 'Blokuj publikację w razie wykrycia lokalnych ścieżek /Users/... lub sekretów'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      NPM_AUTH_TOKEN:
+        description: 'Token autoryzacyjny do registry.npmjs.org'
+        required: false
+      LOCAL_PACKAGE_REGISTRY:
+        description: 'Token autoryzacyjny do prywatnego rejestru Gitea / Gitee'
+        required: false
+
+jobs:
+  publish:
+    name: Test, Verify & Publish Package
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: OSS Sanitization Gate (Leak Prevention)
+        if: ${{ inputs.oss_sanitize_check }}
+        run: |
+          node -e '
+          const { execFileSync } = require("child_process");
+          const files = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
+          const fs = require("fs");
+          const forbidden = [
+            { name: "Local macOS User Path", re: new RegExp("\\x2fUsers\\x2f[a-zA-Z0-9][a-zA-Z0-9._-]*\\x2f") },
+            { name: "Private Key Block", re: new RegExp("-----BEGIN (RSA |OPENSSH |EC |PGP )?PRIVATE KEY-----") },
+            { name: "Sliced Token Prefix", re: /['"`](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)['"`]\s*\+/ },
+            { name: "Partial Secret Slicing", re: /(?:TOKEN|SECRET|PASSWORD|API_KEY|PAT)\s*(?:\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/i }
+          ];
+          const hits = [];
+          for (const f of files) {
+            if (f.startsWith(".agents/") || f.startsWith(".agent/")) {
+              hits.push(`${f}: tracked .agents file is forbidden in OSS packages`);
+              continue;
+            }
+            if (!/\.(js|mjs|cjs|ts|vue|json|md|yml|yaml|html|css)$/.test(f)) continue;
+            const content = fs.readFileSync(f, "utf8");
+            for (const rule of forbidden) {
+              if (rule.re.test(content)) hits.push(`${f}: matched ${rule.name}`);
+            }
+          }
+          if (hits.length > 0) {
+            console.error("❌ [oss-sanitize-gate] Blocked publish due to sensitive patterns:\n" + hits.join("\n"));
+            process.exit(1);
+          }
+          console.log("✅ [oss-sanitize-gate] Clean (" + files.length + " tracked files verified).");
+          '
+
+      - name: Install dependencies, test & build (auto-detected from package.json)
+        env:
+          RUN_TESTS: ${{ inputs.run_tests }}
+          RUN_BUILD: ${{ inputs.run_build }}
+        run: |
+          node -e '
+          const fs = require("fs");
+          const { execSync } = require("child_process");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const hasDeps = Object.keys({ ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }).length > 0;
+          if (hasDeps) {
+            execSync(fs.existsSync("package-lock.json") ? "npm ci" : "npm install", { stdio: "inherit" });
+          }
+          if (process.env.RUN_TESTS === "true" && pkg.scripts && pkg.scripts.test) {
+            console.log("▶ Running npm test...");
+            execSync("npm test", { stdio: "inherit" });
+          }
+          if (process.env.RUN_BUILD === "true" && pkg.scripts && pkg.scripts.build) {
+            console.log("▶ Running npm run build...");
+            execSync("npm run build", { stdio: "inherit" });
+          }
+          '
+
+      - name: Publish to Public NPM Registry (registry.npmjs.org)
+        if: ${{ inputs.publish_npmjs }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "⚠️ NPM_AUTH_TOKEN is not set, skipping npmjs.org publish."
+            exit 0
+          fi
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          EXISTS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/${NAME/\//%2f}/${VER}")
+          if [ "$EXISTS" = "200" ]; then
+            echo "ℹ️ ${NAME}@${VER} is already published on registry.npmjs.org — skipping."
+            exit 0
+          fi
+          npm config set "//registry.npmjs.org/:_authToken" "$NODE_AUTH_TOKEN"
+          npm publish --registry="https://registry.npmjs.org" --access public
+
+      - name: Publish to Private Registry (Gitea / Gitee / Internal)
+        if: ${{ inputs.publish_private }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.LOCAL_PACKAGE_REGISTRY }}
+          PRIVATE_REGISTRY: ${{ inputs.private_registry_url }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "⚠️ LOCAL_PACKAGE_REGISTRY is not set, skipping private registry publish."
+            exit 0
+          fi
+          REG_HOST=$(echo "$PRIVATE_REGISTRY" | sed -E 's|^https?://||')
+          npm config set "//${REG_HOST}:_authToken" "$NODE_AUTH_TOKEN"
+          npm publish --registry="$PRIVATE_REGISTRY" || echo "ℹ️ Version already exists in private registry, skipping."

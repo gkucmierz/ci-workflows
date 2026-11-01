@@ -1,0 +1,81 @@
+name: Reusable Cross-Repo Workflow Dispatch Trigger
+
+on:
+  workflow_call:
+    inputs:
+      target_repos:
+        description: 'Lista repozytoriów docelowych oddzielona przecinkami (np. gkucmierz/virtual-keyboard,gkucmierz/science-blog)'
+        required: true
+        type: string
+      workflow_file:
+        description: 'Nazwa pliku workflow do wyzwolenia (domyślnie deploy.yml)'
+        required: false
+        type: string
+        default: 'deploy.yml'
+      target_ref:
+        description: 'Gałąź lub tag docelowy (domyślnie main)'
+        required: false
+        type: string
+        default: 'main'
+      api_base_url:
+        description: 'Bazowy URL API Gitei lub GitHuba'
+        required: false
+        type: string
+        default: 'https://gitea.7u.pl/api/v1'
+      runs_on:
+        description: 'Etykieta runnera Gitea'
+        required: false
+        type: string
+        default: 'self-hosted-pl'
+    secrets:
+      DISPATCH_PAT:
+        description: 'Personal Access Token z uprawnieniami do wyzwalania workflow_dispatch'
+        required: true
+
+jobs:
+  dispatch:
+    name: Trigger Downstream Workflows
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch downstream repository workflows
+        env:
+          TARGET_REPOS: ${{ inputs.target_repos }}
+          WORKFLOW_FILE: ${{ inputs.workflow_file }}
+          TARGET_REF: ${{ inputs.target_ref }}
+          API_BASE: ${{ inputs.api_base_url }}
+          PAT: ${{ secrets.DISPATCH_PAT }}
+        run: |
+          node -e '
+          (async () => {
+            const pat = process.env.PAT;
+            if (!pat) {
+              console.error("❌ DISPATCH_PAT secret is missing!");
+              process.exit(1);
+            }
+            const repos = (process.env.TARGET_REPOS || "").split(",").map(s => s.trim()).filter(Boolean);
+            const wf = process.env.WORKFLOW_FILE || "deploy.yml";
+            const ref = process.env.TARGET_REF || "main";
+            const apiBase = (process.env.API_BASE || "https://gitea.7u.pl/api/v1").replace(/\/+$/, "");
+
+            for (const repo of repos) {
+              const url = `${apiBase}/repos/${repo}/actions/workflows/${wf}/dispatches`;
+              console.log(`▶ Triggering ${repo} (${wf} @ ${ref})...`);
+              const res = await fetch(url, {
+                method: "POST",
+                headers: {
+                  "Accept": "application/json",
+                  "Authorization": `token ${pat}`,
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ ref })
+              });
+              if (!res.ok) {
+                const body = await res.text();
+                console.error(`❌ Failed to trigger ${repo}: HTTP ${res.status} — ${body}`);
+                process.exit(1);
+              }
+              console.log(`✅ Triggered ${repo} (HTTP ${res.status})`);
+            }
+          })();
+          '

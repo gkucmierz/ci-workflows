@@ -1,0 +1,47 @@
+name: Reusable Scheduled / Manual Container Job (Cron Crawler & Task Runner)
+
+on:
+  workflow_call:
+    inputs:
+      container_name:
+        description: 'Nazwa działającego kontenera Docker (np. fuel-index, mem-index)'
+        required: true
+        type: string
+      command_scheduled:
+        description: 'Komenda wykonywana wewnątrz kontenera przy wywołaniu z harmonogramu (cron)'
+        required: true
+        type: string
+      command_manual:
+        description: 'Opcjonalna komenda przy ręcznym uruchomieniu (workflow_dispatch); domyślnie taka sama jak command_scheduled'
+        required: false
+        type: string
+        default: ''
+      runs_on:
+        description: 'Etykieta runnera Gitea'
+        required: false
+        type: string
+        default: 'self-hosted-pl'
+
+jobs:
+  exec_job:
+    name: Exec in ${{ inputs.container_name }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 15
+    steps:
+      - name: Execute command inside running container
+        env:
+          CONTAINER: ${{ inputs.container_name }}
+          CMD_SCHED: ${{ inputs.command_scheduled }}
+          CMD_MANUAL: ${{ inputs.command_manual }}
+        run: |
+          if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != "true" ]; then
+            echo "❌ Container $CONTAINER is not running!"
+            exit 1
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ] || [ -z "$CMD_MANUAL" ]; then
+            echo "▶ [scheduled] docker exec $CONTAINER sh -c \"$CMD_SCHED\""
+            docker exec "$CONTAINER" sh -c "$CMD_SCHED"
+          else
+            echo "▶ [manual] docker exec $CONTAINER sh -c \"$CMD_MANUAL\""
+            docker exec "$CONTAINER" sh -c "$CMD_MANUAL"
+          fi

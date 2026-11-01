@@ -1,0 +1,89 @@
+name: Reusable Git Mirror & OSS Sanitization Gate (GitHub / Gitee / GitLab)
+
+on:
+  workflow_call:
+    inputs:
+      target_remote_url:
+        description: 'Docelowy URL repozytorium (np. https://github.com/user/repo.git lub https://gitee.com/user/repo.git)'
+        required: true
+        type: string
+      target_branch:
+        description: 'Gałąź docelowa (domyślnie main)'
+        required: false
+        type: string
+        default: 'main'
+      runs_on:
+        description: 'Etykieta runnera Gitea'
+        required: false
+        type: string
+        default: 'self-hosted-pl'
+      oss_sanitize_check:
+        description: 'Weryfikuj brak lokalnych ścieżek /Users/... oraz plików .agents przed pushem'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      MIRROR_TOKEN:
+        description: 'Personal Access Token (PAT) do docelowego hosta Git (GitHub / Gitee / GitLab)'
+        required: true
+      MIRROR_USERNAME:
+        description: 'Nazwa użytkownika dla autoryzacji HTTPS Git'
+        required: false
+
+jobs:
+  mirror:
+    name: Sanitize & Mirror to External Git
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: OSS Sanitization Gate
+        if: ${{ inputs.oss_sanitize_check }}
+        run: |
+          node -e '
+          const { execFileSync } = require("child_process");
+          const fs = require("fs");
+          const files = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
+          const hits = [];
+          for (const f of files) {
+            if (f.startsWith(".agents/") || f.startsWith(".agent/")) {
+              hits.push(`${f}: tracked .agents file is forbidden in OSS mirror`);
+              continue;
+            }
+            if (!/\.(js|mjs|cjs|ts|vue|json|md|yml|yaml|html|css)$/.test(f)) continue;
+            const content = fs.readFileSync(f, "utf8");
+            if (new RegExp("\\x2fUsers\\x2f[a-zA-Z0-9][a-zA-Z0-9._-]*\\x2f").test(content)) {
+              hits.push(`${f}: contains local macOS user path`);
+            }
+            if (/['"`](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)['"`]\s*\+/.test(content)) {
+              hits.push(`${f}: contains sliced/concatenated token prefix`);
+            }
+            if (/(?:TOKEN|SECRET|PASSWORD|API_KEY|PAT)\s*(?:\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/i.test(content)) {
+              hits.push(`${f}: contains partial secret slicing / mask bypass`);
+            }
+          }
+          if (hits.length > 0) {
+            console.error("❌ [oss-sanitize-gate] Mirror aborted due to sensitive files/paths:\n" + hits.join("\n"));
+            process.exit(1);
+          }
+          console.log("✅ [oss-sanitize-gate] Repository verified clean for public mirror.");
+          '
+
+      - name: Push branch and tags to target Git remote
+        env:
+          TARGET_URL: ${{ inputs.target_remote_url }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          MIRROR_USER: ${{ secrets.MIRROR_USERNAME }}
+          MIRROR_PAT: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          AUTH_URL=$(node -e '
+            const u = new URL(process.env.TARGET_URL);
+            u.username = process.env.MIRROR_USER || "git";
+            u.password = process.env.MIRROR_PAT;
+            process.stdout.write(u.toString());
+          ')
+          git push "$AUTH_URL" "HEAD:refs/heads/${TARGET_BRANCH}" --tags --force

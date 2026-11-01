@@ -4,11 +4,13 @@
   "description": "Reusable Gitea Actions, Composite Actions (wait-for-deps, zero-downtime-swap) and Workflow Templates for the 7u.pl Ecosystem",
   "type": "module",
   "bin": {
-    "wait-for-deps": "./bin/wait-for-deps.mjs"
+    "wait-for-deps": "./bin/wait-for-deps.mjs",
+    "oss-sanitize-check": "./bin/sanitize-check.mjs"
   },
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "wait-for-deps": "node ./bin/wait-for-deps.mjs"
+    "wait-for-deps": "node ./bin/wait-for-deps.mjs",
+    "sanitize": "node ./bin/sanitize-check.mjs"
   },
   "keywords": [
     "gitea-actions",

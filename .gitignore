@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.tmp/
+tmp/
+.env
+.env.*
+.agents/
+.agent/
+AGENTS.md
+agents.md
+.DS_Store
+*.log
