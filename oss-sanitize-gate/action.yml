@@ -33,4 +33,5 @@ runs:
     - name: Execute Anti-Token-Slicing & Host-Path Leak Scanner
       shell: bash
       run: |
+        [ -f "${{ github.action_path }}/../bin/sanitize-check.mjs" ] || node "${{ github.action_path }}/../src/buildBin.mjs"
         node "${{ github.action_path }}/../bin/sanitize-check.mjs" "${{ inputs.working_directory }}"

@@ -36,6 +36,7 @@ const IGNORED_DIRS = new Set([
   '.git',
   'node_modules',
   'dist',
+  'bin',
   '.tmp',
   'tmp',
   'coverage',

@@ -11,8 +11,21 @@ import {
   waitForAllDependencies
 } from '../src/waitForDeps.mjs'
 import { scanRepositoryForLeaks } from '../src/sanitizeRepo.mjs'
+import { buildCliBinaries } from '../src/buildBin.mjs'
 
 describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
+  it('builds CLI binaries into bin/ dynamically via buildCliBinaries (prepack / build)', () => {
+    const tmpBin = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-workflows-bin-'))
+    try {
+      const { waitBinPath, sanitizeBinPath } = buildCliBinaries(tmpBin)
+      assert.equal(fs.existsSync(waitBinPath), true)
+      assert.equal(fs.existsSync(sanitizeBinPath), true)
+      assert.match(fs.readFileSync(waitBinPath, 'utf8'), /^#!\/usr\/bin\/env node/)
+      assert.match(fs.readFileSync(sanitizeBinPath, 'utf8'), /^#!\/usr\/bin\/env node/)
+    } finally {
+      fs.rmSync(tmpBin, { recursive: true, force: true })
+    }
+  })
   it('scans non-git directories (e.g. inside node:22-alpine Docker build context) without throwing git ENOENT', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-nogit-'))
     try {

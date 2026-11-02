@@ -1,6 +1,6 @@
 {
   "name": "@gkucmierz/ci-workflows",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Deterministic Reusable Gitea/GitHub Actions, Zero-Downtime Docker Swap, Dependency Readiness Gate (wait-for-deps) & Anti-Token-Slicing OPSEC Scanner",
   "type": "module",
   "main": "./src/index.mjs",
@@ -32,11 +32,13 @@
   },
   "scripts": {
     "dev": "vite --port 30172 --host",
-    "build": "vite build",
+    "build:bin": "node ./src/buildBin.mjs",
+    "build": "node ./src/buildBin.mjs && vite build",
+    "prepack": "node ./src/buildBin.mjs",
     "preview": "vite preview --port 30172 --host",
-    "test": "node --test tests/*.test.js",
-    "wait-for-deps": "node ./bin/wait-for-deps.mjs",
-    "sanitize": "node ./bin/sanitize-check.mjs"
+    "test": "node ./src/buildBin.mjs && node --test tests/*.test.js",
+    "wait-for-deps": "node ./src/buildBin.mjs && node ./bin/wait-for-deps.mjs",
+    "sanitize": "node ./src/buildBin.mjs && node ./bin/sanitize-check.mjs"
   },
   "devDependencies": {
     "@gkucmierz/nano-ui": "^1.8.3",

@@ -28,4 +28,5 @@ runs:
         WAIT_FOR_DEPS_INTERVAL_SEC: ${{ inputs.interval_sec }}
         WAIT_FOR_DEPS_SCOPE: ${{ inputs.scope }}
       run: |
+        [ -f "${{ github.action_path }}/../bin/wait-for-deps.mjs" ] || node "${{ github.action_path }}/../src/buildBin.mjs"
         node "${{ github.action_path }}/../bin/wait-for-deps.mjs" "${{ inputs.working_directory }}"
