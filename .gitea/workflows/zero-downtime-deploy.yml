@@ -43,7 +43,7 @@ jobs:
         run: |
           node -e '
           const fs = require("fs");
-          const files = ["package.json", "ui/package.json", "server/package.json"].filter(f => fs.existsSync(f));
+          const files = ["package.json", "ui/package.json", "server/package.json", "crawler/package.json", "client/package.json", "app/package.json", "web/package.json"].filter(f => fs.existsSync(f));
           const selfNames = new Set();
           const deps = new Map();
           for (const f of files) {
@@ -84,13 +84,14 @@ jobs:
                   queryReg("https://registry.npmjs.org/", name, minVer),
                   queryReg("https://gitea.7u.pl/api/packages/gkucmierz/npm/", name, minVer)
                 ]);
-                if (npmHit) {
-                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w npmjs (" + npmHit.version + ")");
-                  break;
-                }
                 if (giteaHit) {
                   console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w Gitea Packages (" + giteaHit.version + ")");
                   if (giteaHit.tarball) giteaOverrides.set(name, giteaHit.tarball);
+                  break;
+                }
+                if (npmHit) {
+                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w npmjs (" + npmHit.version + ")");
+                  if (npmHit.tarball) giteaOverrides.set(name, npmHit.tarball);
                   break;
                 }
                 if (Date.now() >= deadline) {
@@ -102,6 +103,8 @@ jobs:
               }
             }
             if (giteaOverrides.size > 0) {
+              const path = require("path");
+              let anyChanged = false;
               for (const f of files) {
                 const p = JSON.parse(fs.readFileSync(f, "utf8"));
                 let changed = false;
@@ -116,8 +119,18 @@ jobs:
                   }
                 }
                 if (changed) {
+                  anyChanged = true;
                   fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
-                  console.log("🔗 [wait-for-deps] Zmapowano prywatne pakiety Gitea w " + f);
+                  const lockPath = path.join(path.dirname(f), "package-lock.json");
+                  if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+                  console.log("🔗 [wait-for-deps] Zmapowano pakiety @gkucmierz/* na bezpośrednie tarballe w " + f);
+                }
+              }
+              if (anyChanged) {
+                for (const df of ["Dockerfile", "ui/Dockerfile", "server/Dockerfile", "crawler/Dockerfile"].filter(d => fs.existsSync(d))) {
+                  const content = fs.readFileSync(df, "utf8");
+                  const next = content.replace(/\bnpm\s+ci\b/g, "npm install");
+                  if (next !== content) fs.writeFileSync(df, next);
                 }
               }
             }

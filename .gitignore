@@ -12,3 +12,5 @@ agents.md
 code-recipes/
 .DS_Store
 *.log
+.dashboard
+.agent-working

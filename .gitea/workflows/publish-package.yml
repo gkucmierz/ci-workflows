@@ -110,19 +110,68 @@ jobs:
           node -e '
           const fs = require("fs");
           const { execSync } = require("child_process");
-          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-          const hasDeps = Object.keys({ ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }).length > 0;
-          if (hasDeps) {
-            execSync(fs.existsSync("package-lock.json") ? "npm ci" : "npm install", { stdio: "inherit" });
-          }
-          if (process.env.RUN_TESTS === "true" && pkg.scripts && pkg.scripts.test) {
-            console.log("▶ Running npm test...");
-            execSync("npm test", { stdio: "inherit" });
-          }
-          if (process.env.RUN_BUILD === "true" && pkg.scripts && pkg.scripts.build) {
-            console.log("▶ Running npm run build...");
-            execSync("npm run build", { stdio: "inherit" });
-          }
+          const rawPkg = fs.readFileSync("package.json", "utf8");
+          const pkg = JSON.parse(rawPkg);
+          const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+          const hasDeps = Object.keys(allDeps).length > 0;
+          const cmp = (a, b) => {
+            const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
+            for (let i = 0; i < 3; i++) if ((pa[i]||0) !== (pb[i]||0)) return (pa[i]||0) - (pb[i]||0);
+            return 0;
+          };
+          const queryReg = async (baseUrl, name, minVer) => {
+            try {
+              const res = await fetch(baseUrl + name.replace("/", "%2f") + "?t=" + Date.now(), { headers: { "Cache-Control": "no-cache" } });
+              if (!res.ok) return null;
+              const data = await res.json();
+              const vers = Object.keys(data.versions || {}).filter(v => cmp(v, minVer) >= 0).sort(cmp);
+              if (vers.length === 0) return null;
+              const latest = vers[vers.length - 1];
+              return data.versions?.[latest]?.dist?.tarball || null;
+            } catch {
+              return null;
+            }
+          };
+          (async () => {
+            let pkgModified = false;
+            try {
+              if (hasDeps) {
+                for (const [k, v] of Object.entries(allDeps)) {
+                  if (k.startsWith("@gkucmierz/") && !String(v).startsWith("file:") && !String(v).startsWith("http")) {
+                    const minVer = String(v).replace(/^[^\d]*/, "").split("-")[0];
+                    const [giteaTarball, npmTarball] = await Promise.all([
+                      queryReg("https://gitea.7u.pl/api/packages/gkucmierz/npm/", k, minVer),
+                      queryReg("https://registry.npmjs.org/", k, minVer)
+                    ]);
+                    const resolved = giteaTarball || npmTarball;
+                    if (resolved) {
+                      if (pkg.dependencies && pkg.dependencies[k]) pkg.dependencies[k] = resolved;
+                      if (pkg.devDependencies && pkg.devDependencies[k]) pkg.devDependencies[k] = resolved;
+                      pkgModified = true;
+                    }
+                  }
+                }
+                if (pkgModified) {
+                  fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+                  execSync("npm install --no-package-lock", { stdio: "inherit" });
+                } else {
+                  execSync(fs.existsSync("package-lock.json") ? "npm ci" : "npm install", { stdio: "inherit" });
+                }
+              }
+              if (process.env.RUN_TESTS === "true" && pkg.scripts && pkg.scripts.test) {
+                console.log("▶ Running npm test...");
+                execSync("npm test", { stdio: "inherit" });
+              }
+              if (process.env.RUN_BUILD === "true" && pkg.scripts && pkg.scripts.build) {
+                console.log("▶ Running npm run build...");
+                execSync("npm run build", { stdio: "inherit" });
+              }
+            } finally {
+              if (pkgModified) {
+                fs.writeFileSync("package.json", rawPkg);
+              }
+            }
+          })();
           '
 
       - name: Publish to Private Registry (Gitea / Gitee / Internal — Primary)
@@ -178,6 +227,10 @@ jobs:
           if (pkg.private === true || !lic || lic === "UNLICENSED" || lic === "PROPRIETARY") {
             console.error(`🔒 [Privacy Gate] package.json declares private=${Boolean(pkg.private)} license="${pkg.license || "NONE"}" — strictly blocking public npmjs.org publish.`);
             console.log("BLOCK");
+            process.exit(0);
+          }
+          if (pkg.publishConfig && pkg.publishConfig.access === "public") {
+            console.log("ALLOW");
             process.exit(0);
           }
           const repoFull = process.env.GITHUB_REPOSITORY || "";
