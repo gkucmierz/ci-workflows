@@ -33,7 +33,7 @@ on:
 jobs:
   mirror:
     name: Sanitize & Mirror to External Git
-    runs-on: ${{ inputs.runs_on }}
+    runs-on: self-hosted-pl
     timeout-minutes: 10
     steps:
       - name: Checkout full repository history

@@ -25,7 +25,7 @@ on:
 jobs:
   exec_job:
     name: Exec in ${{ inputs.container_name }}
-    runs-on: ${{ inputs.runs_on }}
+    runs-on: self-hosted-pl
     timeout-minutes: 15
     steps:
       - name: Execute command inside running container

@@ -35,7 +35,7 @@ on:
 jobs:
   dispatch:
     name: Trigger Downstream Workflows
-    runs-on: ${{ inputs.runs_on }}
+    runs-on: self-hosted-pl
     timeout-minutes: 5
     steps:
       - name: Dispatch downstream repository workflows
