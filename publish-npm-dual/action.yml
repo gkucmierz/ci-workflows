@@ -65,7 +65,9 @@ runs:
           exit 0
         fi
         TMP_NPMRC=$(mktemp)
-        trap 'rm -f "$TMP_NPMRC"' EXIT
+        cp package.json package.json.bak
+        trap 'mv -f package.json.bak package.json 2>/dev/null || true; rm -f "$TMP_NPMRC"' EXIT
+        node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json.bak","utf8"));if(p.private){delete p.private;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n");}'
         NAME=$(node -p "require('./package.json').name")
         VER=$(node -p "require('./package.json').version")
         SCOPE=$(node -p "const n=require('./package.json').name; n.startsWith('@') ? n.split('/')[0] : ''")
@@ -80,6 +82,7 @@ runs:
         else
           NPM_CONFIG_USERCONFIG="$TMP_NPMRC" npm publish --registry="$REG_CLEAN" || echo "ℹ️ Private registry publish skipped (version already exists or token unauthorized)."
         fi
+        mv -f package.json.bak package.json
         # Automatically link package to its Gitea repository so package visibility strictly inherits repo Private/Public status
         node -e '
         (async () => {
