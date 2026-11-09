@@ -35,6 +35,7 @@ const FORBIDDEN_RULES = [
 const IGNORED_DIRS = new Set([
   '.git',
   'node_modules',
+  'vendor-tarballs',
   'dist',
   'bin',
   '.tmp',
