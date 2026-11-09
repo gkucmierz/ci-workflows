@@ -44,6 +44,11 @@ jobs:
           node -e '
           const fs = require("fs");
           const files = ["package.json", "ui/package.json", "server/package.json", "crawler/package.json", "client/package.json", "app/package.json", "web/package.json"].filter(f => fs.existsSync(f));
+          const cmp = (a, b) => {
+            const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
+            for (let i = 0; i < 3; i++) if ((pa[i]||0) !== (pb[i]||0)) return (pa[i]||0) - (pb[i]||0);
+            return 0;
+          };
           const selfNames = new Set();
           const deps = new Map();
           for (const f of files) {
@@ -51,16 +56,14 @@ jobs:
             if (p.name) selfNames.add(p.name);
             for (const [k, v] of Object.entries({ ...(p.dependencies || {}), ...(p.devDependencies || {}) })) {
               if (k.startsWith("@gkucmierz/") && !String(v).startsWith("file:") && !String(v).startsWith("http")) {
-                deps.set(k, String(v).replace(/^[^\d]*/, "").split("-")[0]);
+                const ver = String(v).replace(/^[^\d]*/, "").split("-")[0] || "0.0.0";
+                if (!deps.has(k) || cmp(ver, deps.get(k)) > 0) {
+                  deps.set(k, ver);
+                }
               }
             }
           }
           for (const s of selfNames) deps.delete(s);
-          const cmp = (a, b) => {
-            const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
-            for (let i = 0; i < 3; i++) if ((pa[i]||0) !== (pb[i]||0)) return (pa[i]||0) - (pb[i]||0);
-            return 0;
-          };
           const queryReg = async (baseUrl, name, minVer) => {
             try {
               const res = await fetch(baseUrl + name.replace("/", "%2f") + "?t=" + Date.now(), { headers: { "Cache-Control": "no-cache" } });
@@ -188,3 +191,33 @@ jobs:
           echo "❌ Smoke test failed for $URL"
           docker logs "$CONTAINER" --tail 40 || true
           exit 1
+
+      - name: Sync Gitea Repository Website & Description Metadata
+        if: always()
+        env:
+          REPO_TOKEN: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || gitea.token }}
+          HC_URL: ${{ inputs.healthcheck_url }}
+        run: |
+          node -e '
+          const fs = require("fs");
+          const token = process.env.REPO_TOKEN || "";
+          const repoSlug = process.env.GITHUB_REPOSITORY || "";
+          if (!token || !repoSlug) process.exit(0);
+          let pkg = {};
+          try { pkg = JSON.parse(fs.readFileSync("package.json", "utf8")); } catch {}
+          const hcUrl = process.env.HC_URL || "";
+          const website = pkg.homepage || (hcUrl.startsWith("https://") ? hcUrl.replace(/\/+$/, "") : "");
+          const description = (pkg.description || "").trim();
+          if (!website && !description) process.exit(0);
+          const body = {};
+          if (website) body.website = website;
+          if (description) body.description = description;
+          fetch("https://gitea.7u.pl/api/v1/repos/" + repoSlug, {
+            method: "PATCH",
+            headers: {
+              "Authorization": "token " + token,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(body)
+          }).then(r => console.log("🔗 [Gitea Repo Metadata] PATCH /repos/" + repoSlug + " -> HTTP " + r.status)).catch(() => {});
+          '
