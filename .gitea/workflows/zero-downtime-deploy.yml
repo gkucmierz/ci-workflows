@@ -43,6 +43,8 @@ jobs:
         run: |
           node -e '
           const fs = require("fs");
+          const path = require("path");
+          const { execFileSync } = require("child_process");
           const files = ["package.json", "ui/package.json", "server/package.json", "crawler/package.json", "client/package.json", "app/package.json", "web/package.json"].filter(f => fs.existsSync(f));
           const cmp = (a, b) => {
             const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
@@ -80,21 +82,25 @@ jobs:
           };
           (async () => {
             const deadline = Date.now() + (Number(process.env.WAIT_FOR_DEPS_TIMEOUT_SEC || 180) * 1000);
-            const giteaOverrides = new Map();
-            for (const [name, minVer] of deps.entries()) {
+            const resolvedBuffers = new Map();
+            const queue = Array.from(deps.entries());
+            while (queue.length > 0) {
+              const [name, minVer] = queue.shift();
+              if (resolvedBuffers.has(name) && cmp(resolvedBuffers.get(name).version, minVer) >= 0) continue;
+              let hit = null;
               while (true) {
                 const [npmHit, giteaHit] = await Promise.all([
                   queryReg("https://registry.npmjs.org/", name, minVer),
                   queryReg("https://gitea.7u.pl/api/packages/gkucmierz/npm/", name, minVer)
                 ]);
-                if (giteaHit) {
+                if (giteaHit && giteaHit.tarball) {
                   console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w Gitea Packages (" + giteaHit.version + ")");
-                  if (giteaHit.tarball) giteaOverrides.set(name, giteaHit.tarball);
+                  hit = giteaHit;
                   break;
                 }
-                if (npmHit) {
+                if (npmHit && npmHit.tarball) {
                   console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w npmjs (" + npmHit.version + ")");
-                  if (npmHit.tarball) giteaOverrides.set(name, npmHit.tarball);
+                  hit = npmHit;
                   break;
                 }
                 if (Date.now() >= deadline) {
@@ -104,36 +110,74 @@ jobs:
                 console.log("⏳ [wait-for-deps] Czekam 5s na publikację " + name + ">=" + minVer + " (npmjs / Gitea Packages)...");
                 await new Promise(r => setTimeout(r, 5000));
               }
+              const tRes = await fetch(hit.tarball);
+              if (!tRes.ok) {
+                console.error("❌ [wait-for-deps] Nie udało się pobrać tarballa " + hit.tarball + " (HTTP " + tRes.status + ")");
+                process.exit(1);
+              }
+              const buf = Buffer.from(await tRes.arrayBuffer());
+              const safeFile = name.replace(/^@/, "").replace(/\//g, "-") + ".tgz";
+              resolvedBuffers.set(name, { version: hit.version, safeFile, buf });
+              try {
+                const tmpTgz = path.join("/tmp", safeFile);
+                fs.writeFileSync(tmpTgz, buf);
+                const innerPkgRaw = execFileSync("tar", ["-xzOf", tmpTgz, "package/package.json"], { encoding: "utf8" });
+                fs.unlinkSync(tmpTgz);
+                const innerPkg = JSON.parse(innerPkgRaw);
+                for (const [tk, tv] of Object.entries(innerPkg.dependencies || {})) {
+                  if (tk.startsWith("@gkucmierz/") && !selfNames.has(tk)) {
+                    const tVer = String(tv).replace(/^[^\d]*/, "").split("-")[0] || "0.0.0";
+                    if (!resolvedBuffers.has(tk) || cmp(tVer, resolvedBuffers.get(tk).version) > 0) {
+                      queue.push([tk, tVer]);
+                    }
+                  }
+                }
+              } catch {}
             }
-            if (giteaOverrides.size > 0) {
-              const path = require("path");
+            if (resolvedBuffers.size > 0) {
               let anyChanged = false;
               for (const f of files) {
+                const pkgDir = path.dirname(f);
                 const p = JSON.parse(fs.readFileSync(f, "utf8"));
-                let changed = false;
-                for (const [depName, tarballUrl] of giteaOverrides.entries()) {
-                  if (p.dependencies && p.dependencies[depName]) {
-                    p.dependencies[depName] = tarballUrl;
-                    changed = true;
+                const hasScoped = Object.keys({ ...(p.dependencies || {}), ...(p.devDependencies || {}) }).some(k => resolvedBuffers.has(k));
+                if (!hasScoped) continue;
+                const vendorDir = path.join(pkgDir, "vendor-tarballs");
+                fs.mkdirSync(vendorDir, { recursive: true });
+                p.dependencies = p.dependencies || {};
+                p.overrides = p.overrides || {};
+                for (const [depName, info] of resolvedBuffers.entries()) {
+                  fs.writeFileSync(path.join(vendorDir, info.safeFile), info.buf);
+                  const localRef = "file:./vendor-tarballs/" + info.safeFile;
+                  if (p.dependencies[depName] || (!p.devDependencies?.[depName])) {
+                    p.dependencies[depName] = localRef;
                   }
                   if (p.devDependencies && p.devDependencies[depName]) {
-                    p.devDependencies[depName] = tarballUrl;
-                    changed = true;
+                    p.devDependencies[depName] = localRef;
                   }
+                  p.overrides[depName] = localRef;
                 }
-                if (changed) {
-                  anyChanged = true;
-                  fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
-                  const lockPath = path.join(path.dirname(f), "package-lock.json");
-                  if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
-                  console.log("🔗 [wait-for-deps] Zmapowano pakiety @gkucmierz/* na bezpośrednie tarballe w " + f);
+                anyChanged = true;
+                fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
+                const lockPath = path.join(pkgDir, "package-lock.json");
+                if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+                const npmrcPath = path.join(pkgDir, ".npmrc");
+                if (fs.existsSync(npmrcPath)) {
+                  const cleaned = fs.readFileSync(npmrcPath, "utf8").split("\n").filter(l => !l.includes("gitea.7u.pl")).join("\n");
+                  fs.writeFileSync(npmrcPath, cleaned);
                 }
+                console.log("📦 [wait-for-deps] Zapisano lokalne tarballe @gkucmierz/* w " + vendorDir + " i zaktualizowano " + f);
               }
               if (anyChanged) {
+                if (fs.existsSync(".npmrc")) {
+                  const cleaned = fs.readFileSync(".npmrc", "utf8").split("\n").filter(l => !l.includes("gitea.7u.pl")).join("\n");
+                  fs.writeFileSync(".npmrc", cleaned);
+                }
                 for (const df of ["Dockerfile", "ui/Dockerfile", "server/Dockerfile", "crawler/Dockerfile"].filter(d => fs.existsSync(d))) {
-                  const content = fs.readFileSync(df, "utf8");
-                  const next = content.replace(/\bnpm\s+ci\b/g, "npm install");
-                  if (next !== content) fs.writeFileSync(df, next);
+                  let content = fs.readFileSync(df, "utf8").replace(/\bnpm\s+ci\b/g, "npm install");
+                  if (!content.includes("vendor-tarballs")) {
+                    content = content.replace(/^(COPY\s+package)/m, "COPY vendor-tarballs* ./vendor-tarballs/\n$1");
+                  }
+                  fs.writeFileSync(df, content);
                 }
               }
             }
@@ -167,28 +211,36 @@ jobs:
             docker exec "$npm_cid" nginx -s reload 2>/dev/null || true
           done
 
-      - name: Post-Deploy Smoke Test
-        if: ${{ inputs.healthcheck_url != '' }}
+      - name: Post-Deploy Auto Smoke Test (Internal Container Probe & Homepage)
         run: |
           URL="${{ inputs.healthcheck_url }}"
+          if [ -z "$URL" ] && [ -f package.json ]; then
+            URL=$(node -e 'try { const p = JSON.parse(require("fs").readFileSync("package.json","utf8")); if (p.homepage && p.homepage.startsWith("http")) console.log(p.homepage); } catch {}' 2>/dev/null || echo "")
+          fi
           CONTAINER="${{ inputs.container_name }}"
-          echo "🔍 Smoke-testing $URL (container: $CONTAINER) ..."
+          echo "🔍 Smoke-testing container: $CONTAINER ${URL:+(url: $URL)} ..."
           for i in 1 2 3 4 5; do
-            STATUS=$(node -e "fetch(process.argv[1]).then(r => console.log(r.status)).catch(() => console.log('000'))" "$URL" 2>/dev/null || echo "000")
-            if [ "$STATUS" = "200" ] || [ "$STATUS" = "301" ] || [ "$STATUS" = "302" ]; then
-              echo "✅ Smoke test passed ($URL -> HTTP $STATUS)"
-              exit 0
-            fi
             if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
               if docker exec "$CONTAINER" wget -q -O /dev/null http://127.0.0.1:80/ 2>/dev/null; then
                 echo "✅ Smoke test passed via internal container probe ($CONTAINER -> 127.0.0.1:80 HTTP 200)"
                 exit 0
               fi
             fi
-            echo "⏳ Attempt $i/5 returned HTTP $STATUS, retrying in 2s..."
+            if [ -n "$URL" ]; then
+              STATUS=$(node -e "fetch(process.argv[1]).then(r => console.log(r.status)).catch(() => console.log('000'))" "$URL" 2>/dev/null || echo "000")
+              if [ "$STATUS" = "200" ] || [ "$STATUS" = "301" ] || [ "$STATUS" = "302" ]; then
+                echo "✅ Smoke test passed ($URL -> HTTP $STATUS)"
+                exit 0
+              fi
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ] && [ -z "$URL" ]; then
+              echo "✅ Container $CONTAINER is running"
+              exit 0
+            fi
+            echo "⏳ Attempt $i/5 waiting for $CONTAINER readiness, retrying in 2s..."
             sleep 2
           done
-          echo "❌ Smoke test failed for $URL"
+          echo "❌ Smoke test failed for $CONTAINER"
           docker logs "$CONTAINER" --tail 40 || true
           exit 1
 
