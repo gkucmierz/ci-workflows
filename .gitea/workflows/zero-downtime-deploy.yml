@@ -40,11 +40,13 @@ jobs:
       - name: Wait for @gkucmierz/* dependencies (NPM & Gitea Packages)
         env:
           WAIT_FOR_DEPS_TIMEOUT_SEC: ${{ inputs.wait_timeout_sec }}
+          GITEA_PKG_TOKEN: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || gitea.token }}
         run: |
           node -e '
           const fs = require("fs");
           const path = require("path");
           const { execFileSync } = require("child_process");
+          const giteaToken = process.env.GITEA_PKG_TOKEN || "";
           const files = ["package.json", "ui/package.json", "server/package.json", "crawler/package.json", "client/package.json", "app/package.json", "web/package.json"].filter(f => fs.existsSync(f));
           const cmp = (a, b) => {
             const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
@@ -66,9 +68,17 @@ jobs:
             }
           }
           for (const s of selfNames) deps.delete(s);
+          const buildHeaders = (url) => {
+            const h = { "Cache-Control": "no-cache" };
+            if (giteaToken && String(url).includes("gitea.7u.pl")) {
+              h["Authorization"] = "token " + giteaToken;
+            }
+            return h;
+          };
           const queryReg = async (baseUrl, name, minVer) => {
             try {
-              const res = await fetch(baseUrl + name.replace("/", "%2f") + "?t=" + Date.now(), { headers: { "Cache-Control": "no-cache" } });
+              const url = baseUrl + name.replace("/", "%2f") + "?t=" + Date.now();
+              const res = await fetch(url, { headers: buildHeaders(url) });
               if (!res.ok) return null;
               const data = await res.json();
               const vers = Object.keys(data.versions || {}).filter(v => cmp(v, minVer) >= 0).sort(cmp);
@@ -110,7 +120,7 @@ jobs:
                 console.log("⏳ [wait-for-deps] Czekam 5s na publikację " + name + ">=" + minVer + " (npmjs / Gitea Packages)...");
                 await new Promise(r => setTimeout(r, 5000));
               }
-              const tRes = await fetch(hit.tarball);
+              const tRes = await fetch(hit.tarball, { headers: buildHeaders(hit.tarball) });
               if (!tRes.ok) {
                 console.error("❌ [wait-for-deps] Nie udało się pobrać tarballa " + hit.tarball + " (HTTP " + tRes.status + ")");
                 process.exit(1);
