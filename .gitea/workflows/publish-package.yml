@@ -238,7 +238,7 @@ jobs:
       - name: Publish to Public NPM Registry (registry.npmjs.org — Secondary, Public-Only Gate)
         if: ${{ inputs.publish_npmjs }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN || secrets.NPM_TOKEN }}
         run: |
           ALLOW_PUBLIC=$(node -e '
           const fs = require("fs");

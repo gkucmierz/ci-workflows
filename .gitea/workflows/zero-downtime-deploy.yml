@@ -53,14 +53,28 @@ jobs:
             for (let i = 0; i < 3; i++) if ((pa[i]||0) !== (pb[i]||0)) return (pa[i]||0) - (pb[i]||0);
             return 0;
           };
+          const UNSCOPED_INTERNAL_PKGS = new Set(["i18n-scroll-restore", "vue-url-cleaner"]);
+          const isInternalDep = (name, verSpec) => {
+            if (!name) return false;
+            if (name.startsWith("@gkucmierz/")) return true;
+            if (UNSCOPED_INTERNAL_PKGS.has(name)) return true;
+            if (String(verSpec || "").includes("gitea.7u.pl")) return true;
+            return false;
+          };
+          const extractMinVer = (verSpec) => {
+            const s = String(verSpec || "");
+            const urlMatch = s.match(/\/-\/(\d+\.\d+\.\d+)(?:\/|$)/) || s.match(/-(\d+\.\d+\.\d+)\.tgz/);
+            if (urlMatch) return urlMatch[1];
+            return s.replace(/^[^\d]*/, "").split("-")[0] || "0.0.0";
+          };
           const selfNames = new Set();
           const deps = new Map();
           for (const f of files) {
             const p = JSON.parse(fs.readFileSync(f, "utf8"));
             if (p.name) selfNames.add(p.name);
             for (const [k, v] of Object.entries({ ...(p.dependencies || {}), ...(p.devDependencies || {}) })) {
-              if (k.startsWith("@gkucmierz/") && !String(v).startsWith("file:") && !String(v).startsWith("http")) {
-                const ver = String(v).replace(/^[^\d]*/, "").split("-")[0] || "0.0.0";
+              if (isInternalDep(k, v) && !String(v).startsWith("file:")) {
+                const ver = extractMinVer(v);
                 if (!deps.has(k) || cmp(ver, deps.get(k)) > 0) {
                   deps.set(k, ver);
                 }
@@ -70,10 +84,14 @@ jobs:
           for (const s of selfNames) deps.delete(s);
           const buildHeaders = (url) => {
             const h = { "Cache-Control": "no-cache" };
-            if (giteaToken && String(url).includes("gitea.7u.pl")) {
+            if (giteaToken && (String(url).includes("gitea.7u.pl") || String(url).includes("gitea:3000"))) {
               h["Authorization"] = "token " + giteaToken;
             }
             return h;
+          };
+          const rewriteInternalGiteaUrl = (url) => {
+            if (!url) return url;
+            return String(url).replace(/^https:\/\/gitea\.7u\.pl\//, "http://gitea:3000/");
           };
           const queryReg = async (baseUrl, name, minVer) => {
             try {
@@ -90,6 +108,30 @@ jobs:
               return null;
             }
           };
+          const autoHealDispatched = new Set();
+          const triggerUpstreamSelfHeal = async (pkgName, minVer) => {
+            if (autoHealDispatched.has(pkgName) || !giteaToken) return;
+            autoHealDispatched.add(pkgName);
+            const repoName = pkgName.replace(/^@gkucmierz\//, "");
+            for (const apiBase of ["http://gitea:3000/api/v1", "https://gitea.7u.pl/api/v1"]) {
+              for (const wf of ["publish.yml", "deploy.yml"]) {
+                try {
+                  const res = await fetch(`${apiBase}/repos/gkucmierz/${repoName}/actions/workflows/${wf}/dispatches`, {
+                    method: "POST",
+                    headers: {
+                      "Authorization": "token " + giteaToken,
+                      "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ ref: "main" })
+                  });
+                  if (res.status === 204 || res.status === 200 || res.status === 201) {
+                    console.log(`🩺 [self-heal] Auto-triggered workflow ${wf} for gkucmierz/${repoName} (waiting for ${pkgName}>=${minVer})`);
+                    return;
+                  }
+                } catch {}
+              }
+            }
+          };
           (async () => {
             const deadline = Date.now() + (Number(process.env.WAIT_FOR_DEPS_TIMEOUT_SEC || 180) * 1000);
             const resolvedBuffers = new Map();
@@ -99,10 +141,16 @@ jobs:
               if (resolvedBuffers.has(name) && cmp(resolvedBuffers.get(name).version, minVer) >= 0) continue;
               let hit = null;
               while (true) {
-                const [npmHit, giteaHit] = await Promise.all([
-                  queryReg("https://registry.npmjs.org/", name, minVer),
-                  queryReg("https://gitea.7u.pl/api/packages/gkucmierz/npm/", name, minVer)
+                const [internalGiteaHit, giteaHit, npmHit] = await Promise.all([
+                  queryReg("http://gitea:3000/api/packages/gkucmierz/npm/", name, minVer),
+                  queryReg("https://gitea.7u.pl/api/packages/gkucmierz/npm/", name, minVer),
+                  queryReg("https://registry.npmjs.org/", name, minVer)
                 ]);
+                if (internalGiteaHit && internalGiteaHit.tarball) {
+                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w Gitea Internal (" + internalGiteaHit.version + ")");
+                  hit = { ...internalGiteaHit, tarball: rewriteInternalGiteaUrl(internalGiteaHit.tarball) };
+                  break;
+                }
                 if (giteaHit && giteaHit.tarball) {
                   console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w Gitea Packages (" + giteaHit.version + ")");
                   hit = giteaHit;
@@ -113,36 +161,55 @@ jobs:
                   hit = npmHit;
                   break;
                 }
+                await triggerUpstreamSelfHeal(name, minVer);
                 if (Date.now() >= deadline) {
                   console.error("❌ [wait-for-deps] Timeout oczekiwania na " + name + ">=" + minVer + " (npmjs + Gitea Packages)");
                   process.exit(1);
                 }
-                console.log("⏳ [wait-for-deps] Czekam 5s na publikację " + name + ">=" + minVer + " (npmjs / Gitea Packages)...");
+                console.log("⏳ [wait-for-deps] Czekam 5s na publikację " + name + ">=" + minVer + " (Gitea Packages / npmjs)...");
                 await new Promise(r => setTimeout(r, 5000));
               }
-              const tRes = await fetch(hit.tarball, { headers: buildHeaders(hit.tarball) });
-              if (!tRes.ok) {
-                console.error("❌ [wait-for-deps] Nie udało się pobrać tarballa " + hit.tarball + " (HTTP " + tRes.status + ")");
+              let tRes = await fetch(hit.tarball, { headers: buildHeaders(hit.tarball) }).catch(() => null);
+              if ((!tRes || !tRes.ok) && String(hit.tarball).includes("gitea.7u.pl")) {
+                const altUrl = rewriteInternalGiteaUrl(hit.tarball);
+                tRes = await fetch(altUrl, { headers: buildHeaders(altUrl) }).catch(() => null);
+              }
+              if (!tRes || !tRes.ok) {
+                console.error("❌ [wait-for-deps] Nie udało się pobrać tarballa " + hit.tarball + " (HTTP " + (tRes ? tRes.status : "ERR") + ")");
                 process.exit(1);
               }
-              const buf = Buffer.from(await tRes.arrayBuffer());
+              let buf = Buffer.from(await tRes.arrayBuffer());
               const safeFile = name.replace(/^@/, "").replace(/\//g, "-") + ".tgz";
-              resolvedBuffers.set(name, { version: hit.version, safeFile, buf });
               try {
                 const tmpTgz = path.join("/tmp", safeFile);
                 fs.writeFileSync(tmpTgz, buf);
                 const innerPkgRaw = execFileSync("tar", ["-xzOf", tmpTgz, "package/package.json"], { encoding: "utf8" });
-                fs.unlinkSync(tmpTgz);
                 const innerPkg = JSON.parse(innerPkgRaw);
+                let innerModified = false;
                 for (const [tk, tv] of Object.entries(innerPkg.dependencies || {})) {
-                  if (tk.startsWith("@gkucmierz/") && !selfNames.has(tk)) {
-                    const tVer = String(tv).replace(/^[^\d]*/, "").split("-")[0] || "0.0.0";
+                  if (isInternalDep(tk, tv) && !selfNames.has(tk)) {
+                    const tVer = extractMinVer(tv);
                     if (!resolvedBuffers.has(tk) || cmp(tVer, resolvedBuffers.get(tk).version) > 0) {
                       queue.push([tk, tVer]);
                     }
+                    if (String(tv).includes("gitea.7u.pl")) {
+                      innerPkg.dependencies[tk] = "^" + (tVer === "0.0.0" ? "1.0.0" : tVer);
+                      innerModified = true;
+                    }
                   }
                 }
+                if (innerModified) {
+                  const repackDir = path.join("/tmp", "repack-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+                  fs.mkdirSync(repackDir, { recursive: true });
+                  execFileSync("tar", ["-xzf", tmpTgz, "-C", repackDir]);
+                  fs.writeFileSync(path.join(repackDir, "package", "package.json"), JSON.stringify(innerPkg, null, 2) + "\n");
+                  execFileSync("tar", ["-czf", tmpTgz, "-C", repackDir, "package"]);
+                  buf = fs.readFileSync(tmpTgz);
+                  fs.rmSync(repackDir, { recursive: true, force: true });
+                }
+                fs.unlinkSync(tmpTgz);
               } catch {}
+              resolvedBuffers.set(name, { version: hit.version, safeFile, buf });
             }
             if (resolvedBuffers.size > 0) {
               let anyChanged = false;
@@ -198,6 +265,19 @@ jobs:
         run: |
           CONTAINER="${{ inputs.container_name }}"
           HOT_SWAP="${{ inputs.hot_swap_static }}"
+          node -e '
+            const fs = require("fs");
+            if (fs.existsSync("docker-compose.yml")) {
+              let dc = fs.readFileSync("docker-compose.yml", "utf8");
+              dc = dc.replace(/^(\s*)build:\s*\.\s*$/gm, "$1build:\n$1  context: .\n$1  network: host");
+              dc = dc.replace(/^(\s*build:\s*\n(?:\s+[^\n]+\n)*?)(\s*dockerfile:\s*[^\n]+)$/gm, (m, p1, p2) => {
+                if (m.includes("network:")) return m;
+                const indent = (p2.match(/^\s*/) || ["      "])[0];
+                return p1 + p2 + "\n" + indent + "network: host";
+              });
+              fs.writeFileSync("docker-compose.yml", dc);
+            }
+          '
           docker compose build
           if [ "$HOT_SWAP" = "true" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
             IMG_NAME=$(docker compose config --images 2>/dev/null | head -n 1)
