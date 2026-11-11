@@ -297,3 +297,58 @@ export const waitForAllDependencies = async (
     await sleepImpl(pollIntervalMs)
   }
 }
+
+/**
+ * Deterministically rewrites `npm ci` (including `npm --prefix <dir> ci`) to `npm install`
+ * and injects `COPY <src>/vendor-tarballs <dest>/vendor-tarballs/` instructions ONLY for
+ * package directories whose `vendor-tarballs/` folder actually exists on disk (`existingVendorDirs`).
+ */
+export const patchDockerfileVendorTarballs = (
+  dockerfileContent,
+  dfRelPath = 'Dockerfile',
+  existingVendorDirs = []
+) => {
+  const vendorSet = new Set(
+    Array.from(existingVendorDirs || []).map((d) => String(d || '.').replace(/\/+$/, '') || '.')
+  )
+  let content = String(dockerfileContent || '').replace(
+    /\bnpm(\s+(?:--prefix\s+\S+\s+)*)ci\b/g,
+    'npm$1install'
+  )
+  if (content.includes('vendor-tarballs') || vendorSet.size === 0) {
+    return content
+  }
+
+  const normalizedDf = String(dfRelPath || 'Dockerfile').replace(/\\/g, '/')
+  const dfDir = path.posix.dirname(normalizedDf) || '.'
+  const subDirsRe = /^(ui|server|crawler|client|app|web)\/package/
+
+  const patchedLines = []
+  for (const line of content.split('\n')) {
+    const copyMatch = line.match(/^(\s*COPY\s+(?:--\S+\s+)*)(.+?)\s+(\S+)\s*$/)
+    if (copyMatch) {
+      const [, prefix, sourcesStr, rawDest] = copyMatch
+      const tokens = sourcesStr.trim().split(/\s+/)
+      const destVendor =
+        rawDest === '/'
+          ? '/vendor-tarballs/'
+          : `${rawDest.replace(/\/+$/, '') || '.'}/vendor-tarballs/`
+
+      let injected = false
+      for (const tok of tokens) {
+        const subMatch = tok.match(subDirsRe)
+        if (subMatch && vendorSet.has(subMatch[1])) {
+          patchedLines.push(`${prefix}${subMatch[1]}/vendor-tarballs ${destVendor}`)
+          injected = true
+          break
+        }
+      }
+      if (!injected && tokens.some((tok) => /^(?:\.\/)?package/.test(tok)) && vendorSet.has(dfDir)) {
+        patchedLines.push(`${prefix}vendor-tarballs ${destVendor}`)
+      }
+    }
+    patchedLines.push(line)
+  }
+
+  return patchedLines.join('\n')
+}
