@@ -69,3 +69,19 @@ jobs:
             exit 0
           fi
           git push --force "https://gkucmierz:${MIRROR_TOKEN}@github.com/gkucmierz/ci-workflows.git" HEAD:refs/heads/main || true
+
+  purge_de_runner_cache:
+    name: Purge Stale ci-workflows Act Cache on DE Runner
+    needs: release_and_deploy
+    if: always()
+    runs-on: self-hosted-de
+    timeout-minutes: 5
+    steps:
+      - name: Purge cached ci-workflows clones on self-hosted-de
+        run: |
+          for d in /root/.cache/act/* /data/.cache/act/*; do
+            if [ -d "$d/.git" ] && git -C "$d" remote -v 2>/dev/null | grep -q "ci-workflows"; then
+              echo "🧹 [DE Runner] Purging cached ci-workflows action dir: $d"
+              rm -rf "$d" || true
+            fi
+          done

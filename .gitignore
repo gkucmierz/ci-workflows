@@ -13,3 +13,4 @@ code-recipes/
 .DS_Store
 *.log
 .dashboard-app
+.ecosystem-governance

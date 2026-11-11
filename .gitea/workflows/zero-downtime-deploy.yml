@@ -31,7 +31,7 @@ on:
 jobs:
   deploy:
     name: Deploy (${{ inputs.container_name }})
-    runs-on: self-hosted-pl
+    runs-on: ${{ inputs.runs_on || 'self-hosted-pl' }}
     timeout-minutes: 15
     steps:
       - name: Checkout repository code
