@@ -8,7 +8,8 @@ import {
   compareSemver,
   isVersionSatisfied,
   extractScopedDependencies,
-  waitForAllDependencies
+  waitForAllDependencies,
+  patchDockerfileVendorTarballs
 } from '../src/waitForDeps.mjs'
 import { scanRepositoryForLeaks } from '../src/sanitizeRepo.mjs'
 import { buildCliBinaries } from '../src/buildBin.mjs'
@@ -205,5 +206,87 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
       encoding: 'utf8'
     })
     assert.match(out, /\[oss-sanitize-gate\] Clean/)
+
+    // Verify zero-downtime-deploy.yml picks highest SemVer across registries and supports .yml/.yaml self-heal workflows
+    const deployYml = fs.readFileSync(
+      path.join(rootDir, '.gitea/workflows/zero-downtime-deploy.yml'),
+      'utf8'
+    )
+    assert.match(deployYml, /cmp\(b\.version,\s*a\.version\)/)
+    assert.match(deployYml, /b\.prio\s*-\s*a\.prio/)
+    for (const wfName of [
+      'publish.yml',
+      'publish.yaml',
+      'build.yml',
+      'build.yaml',
+      'deploy.yml',
+      'deploy.yaml'
+    ]) {
+      assert.ok(deployYml.includes(`"${wfName}"`), `Missing ${wfName} in triggerUpstreamSelfHeal`)
+    }
+
+    // Verify nginx -s reload closes stdin & stdout/stderr pipes to prevent 3h act_runner hangs
+    assert.match(deployYml, /nginx -s reload <\/dev\/null >\/dev\/null 2>&1/)
+  })
+
+  it('should patch both single-root SPA Dockerfiles and multi-directory fullstack Dockerfiles (ui/server/crawler) with exact vendor-tarballs paths', () => {
+    const spaDockerfile = [
+      'FROM node:22-alpine AS builder',
+      'WORKDIR /app',
+      'COPY package*.json .npmrc* ./',
+      'RUN npm ci',
+      'COPY . .',
+      'RUN npm run build'
+    ].join('\n')
+
+    const patchedSpa = patchDockerfileVendorTarballs(spaDockerfile, 'Dockerfile', ['.'])
+    assert.ok(patchedSpa.includes('COPY vendor-tarballs ./vendor-tarballs/\nCOPY package*.json .npmrc* ./'))
+    assert.ok(patchedSpa.includes('RUN npm install'))
+    assert.ok(!patchedSpa.includes('npm ci'))
+
+    const fullstackDockerfile = [
+      'FROM node:22-alpine AS ui-builder',
+      'WORKDIR /app/ui',
+      'COPY ui/package*.json ui/.npmrc* .npmrc* ./',
+      'RUN npm install --no-package-lock',
+      '',
+      'FROM node:22-alpine AS runtime',
+      'WORKDIR /app',
+      'COPY package.json ./',
+      'COPY server/package*.json server/.npmrc* .npmrc* ./server/',
+      'COPY crawler/package*.json crawler/.npmrc* .npmrc* ./crawler/',
+      'RUN npm --prefix server ci --omit=dev'
+    ].join('\n')
+
+    // Root '.' has no vendor-tarballs (only 'concurrently'), while ui, server, crawler have vendor-tarballs
+    const patchedFullstack = patchDockerfileVendorTarballs(fullstackDockerfile, 'Dockerfile', [
+      'ui',
+      'server',
+      'crawler'
+    ])
+    assert.ok(
+      patchedFullstack.includes('COPY ui/vendor-tarballs ./vendor-tarballs/\nCOPY ui/package*.json'),
+      'Injects ui/vendor-tarballs into ui-builder WORKDIR ./'
+    )
+    assert.ok(
+      patchedFullstack.includes(
+        'COPY server/vendor-tarballs ./server/vendor-tarballs/\nCOPY server/package*.json'
+      ),
+      'Injects server/vendor-tarballs into ./server/vendor-tarballs/'
+    )
+    assert.ok(
+      patchedFullstack.includes(
+        'COPY crawler/vendor-tarballs ./crawler/vendor-tarballs/\nCOPY crawler/package*.json'
+      ),
+      'Injects crawler/vendor-tarballs into ./crawler/vendor-tarballs/'
+    )
+    assert.ok(
+      !patchedFullstack.includes('COPY vendor-tarballs ./vendor-tarballs/\nCOPY package.json ./'),
+      'Must NOT inject nonexistent root vendor-tarballs when root has no internal deps'
+    )
+    assert.ok(
+      patchedFullstack.includes('RUN npm --prefix server install --omit=dev'),
+      'Rewrites npm --prefix <dir> ci to install'
+    )
   })
 })
