@@ -114,7 +114,7 @@ jobs:
             autoHealDispatched.add(pkgName);
             const repoName = pkgName.replace(/^@gkucmierz\//, "");
             for (const apiBase of ["http://gitea:3000/api/v1", "https://gitea.7u.pl/api/v1"]) {
-              for (const wf of ["publish.yml", "deploy.yml"]) {
+              for (const wf of ["publish.yml", "publish.yaml", "build.yml", "build.yaml", "deploy.yml", "deploy.yaml"]) {
                 try {
                   const res = await fetch(`${apiBase}/repos/gkucmierz/${repoName}/actions/workflows/${wf}/dispatches`, {
                     method: "POST",
@@ -146,19 +146,24 @@ jobs:
                   queryReg("https://gitea.7u.pl/api/packages/gkucmierz/npm/", name, minVer),
                   queryReg("https://registry.npmjs.org/", name, minVer)
                 ]);
-                if (internalGiteaHit && internalGiteaHit.tarball) {
-                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w Gitea Internal (" + internalGiteaHit.version + ")");
-                  hit = { ...internalGiteaHit, tarball: rewriteInternalGiteaUrl(internalGiteaHit.tarball) };
-                  break;
-                }
-                if (giteaHit && giteaHit.tarball) {
-                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w Gitea Packages (" + giteaHit.version + ")");
-                  hit = giteaHit;
-                  break;
-                }
-                if (npmHit && npmHit.tarball) {
-                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w npmjs (" + npmHit.version + ")");
-                  hit = npmHit;
+                const candidates = [
+                  internalGiteaHit && internalGiteaHit.tarball
+                    ? { ...internalGiteaHit, tarball: rewriteInternalGiteaUrl(internalGiteaHit.tarball), label: "Gitea Internal", prio: 3 }
+                    : null,
+                  giteaHit && giteaHit.tarball
+                    ? { ...giteaHit, label: "Gitea Packages", prio: 2 }
+                    : null,
+                  npmHit && npmHit.tarball
+                    ? { ...npmHit, label: "npmjs", prio: 1 }
+                    : null
+                ].filter(Boolean);
+                if (candidates.length > 0) {
+                  candidates.sort((a, b) => {
+                    const vDiff = cmp(b.version, a.version);
+                    return vDiff !== 0 ? vDiff : b.prio - a.prio;
+                  });
+                  hit = candidates[0];
+                  console.log("✅ [wait-for-deps] " + name + " >= " + minVer + " dostępny w " + hit.label + " (" + hit.version + ")");
                   break;
                 }
                 await triggerUpstreamSelfHeal(name, minVer);
@@ -213,13 +218,15 @@ jobs:
             }
             if (resolvedBuffers.size > 0) {
               let anyChanged = false;
+              const vendorDirs = new Set();
               for (const f of files) {
-                const pkgDir = path.dirname(f);
+                const pkgDir = path.dirname(f) || ".";
                 const p = JSON.parse(fs.readFileSync(f, "utf8"));
                 const hasScoped = Object.keys({ ...(p.dependencies || {}), ...(p.devDependencies || {}) }).some(k => resolvedBuffers.has(k));
                 if (!hasScoped) continue;
                 const vendorDir = path.join(pkgDir, "vendor-tarballs");
                 fs.mkdirSync(vendorDir, { recursive: true });
+                vendorDirs.add(pkgDir.replace(/\/+$/, "") || ".");
                 p.dependencies = p.dependencies || {};
                 p.overrides = p.overrides || {};
                 for (const [depName, info] of resolvedBuffers.entries()) {
@@ -249,10 +256,34 @@ jobs:
                   const cleaned = fs.readFileSync(".npmrc", "utf8").split("\n").filter(l => !l.includes("gitea.7u.pl")).join("\n");
                   fs.writeFileSync(".npmrc", cleaned);
                 }
-                for (const df of ["Dockerfile", "ui/Dockerfile", "server/Dockerfile", "crawler/Dockerfile"].filter(d => fs.existsSync(d))) {
-                  let content = fs.readFileSync(df, "utf8").replace(/\bnpm\s+ci\b/g, "npm install");
-                  if (!content.includes("vendor-tarballs")) {
-                    content = content.replace(/^(COPY\s+package)/m, "COPY vendor-tarballs* ./vendor-tarballs/\n$1");
+                const subDirsRe = /^(ui|server|crawler|client|app|web)\/package/;
+                for (const df of ["Dockerfile", "ui/Dockerfile", "server/Dockerfile", "crawler/Dockerfile", "client/Dockerfile", "app/Dockerfile", "web/Dockerfile"].filter(d => fs.existsSync(d))) {
+                  let content = fs.readFileSync(df, "utf8").replace(/\bnpm(\s+(?:--prefix\s+\S+\s+)*)ci\b/g, "npm$1install");
+                  if (!content.includes("vendor-tarballs") && vendorDirs.size > 0) {
+                    const dfDir = path.posix.dirname(df.replace(/\\/g, "/")) || ".";
+                    const outLines = [];
+                    for (const line of content.split("\n")) {
+                      const m = line.match(/^(\s*COPY\s+(?:--\S+\s+)*)(.+?)\s+(\S+)\s*$/);
+                      if (m) {
+                        const [, prefix, sourcesStr, rawDest] = m;
+                        const tokens = sourcesStr.trim().split(/\s+/);
+                        const destVendor = rawDest === "/" ? "/vendor-tarballs/" : ((rawDest.replace(/\/+$/, "") || ".") + "/vendor-tarballs/");
+                        let injected = false;
+                        for (const tok of tokens) {
+                          const sm = tok.match(subDirsRe);
+                          if (sm && vendorDirs.has(sm[1])) {
+                            outLines.push(prefix + sm[1] + "/vendor-tarballs " + destVendor);
+                            injected = true;
+                            break;
+                          }
+                        }
+                        if (!injected && tokens.some(tok => /^(?:\.\/)?package/.test(tok)) && vendorDirs.has(dfDir)) {
+                          outLines.push(prefix + "vendor-tarballs " + destVendor);
+                        }
+                      }
+                      outLines.push(line);
+                    }
+                    content = outLines.join("\n");
                   }
                   fs.writeFileSync(df, content);
                 }
@@ -290,7 +321,7 @@ jobs:
               docker cp "$TMP_CID:/etc/nginx/conf.d/default.conf" "$TMP_DIR/default.conf" 2>/dev/null && docker cp "$TMP_DIR/default.conf" "$CONTAINER:/etc/nginx/conf.d/default.conf" 2>/dev/null || true
               rm -rf "$TMP_DIR"
               docker rm -f "$TMP_CID" >/dev/null 2>&1 || true
-              docker exec "$CONTAINER" nginx -s reload
+              docker exec "$CONTAINER" nginx -s reload </dev/null >/dev/null 2>&1
             else
               docker compose up -d --remove-orphans
             fi
@@ -298,7 +329,7 @@ jobs:
             docker compose up -d --remove-orphans
           fi
           for npm_cid in $(docker ps -q --filter "ancestor=jc21/nginx-proxy-manager" --filter "status=running"); do
-            docker exec "$npm_cid" nginx -s reload 2>/dev/null || true
+            docker exec "$npm_cid" nginx -s reload </dev/null >/dev/null 2>&1 || true
           done
 
       - name: Post-Deploy Auto Smoke Test (Internal Container Probe & Homepage)
