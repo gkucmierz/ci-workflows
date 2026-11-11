@@ -127,19 +127,25 @@ export const checkPackageAvailability = async (
   range,
   {
     registryUrl = 'https://registry.npmjs.org',
+    authToken = process.env.GITEA_PKG_TOKEN || process.env.LOCAL_PACKAGE_REGISTRY || process.env.GITEA_TOKEN || '',
     fetchImpl = globalThis.fetch
   } = {}
 ) => {
   const encodedName = pkgName.replace('/', '%2f')
   const url = `${registryUrl.replace(/\/$/, '')}/${encodedName}?t=${Date.now()}`
+  const isGiteaReg = String(url).includes('gitea.7u.pl') || String(url).includes('gitea:3000')
+  const reqHeaders = {
+    Accept: 'application/json',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache'
+  }
+  if (authToken && isGiteaReg) {
+    reqHeaders.Authorization = `token ${authToken}`
+  }
 
   try {
     const res = await fetchImpl(url, {
-      headers: {
-        Accept: 'application/json',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        Pragma: 'no-cache'
-      }
+      headers: reqHeaders
     })
     if (!res.ok) {
       return {
@@ -169,7 +175,11 @@ export const checkPackageAvailability = async (
     const tarballUrl = versionsObj[bestMatch]?.dist?.tarball
 
     if (tarballUrl) {
-      const headRes = await fetchImpl(tarballUrl, { method: 'HEAD' })
+      const tarballHeaders =
+        authToken && (String(tarballUrl).includes('gitea.7u.pl') || String(tarballUrl).includes('gitea:3000'))
+          ? { Authorization: `token ${authToken}` }
+          : {}
+      const headRes = await fetchImpl(tarballUrl, { method: 'HEAD', headers: tarballHeaders })
       if (!headRes.ok && headRes.status !== 405) {
         return {
           available: false,
