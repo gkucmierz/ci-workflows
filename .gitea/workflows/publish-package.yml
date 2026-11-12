@@ -403,6 +403,10 @@ jobs:
                     fs.writeFileSync(".npmrc", rawNpmrc.split("\n").filter(l => !isPrivateHostUrl(l)).join("\n"));
                   }
                   execSync("npm install --no-package-lock", { stdio: "inherit" });
+                  fs.writeFileSync("package.json", rawPkg);
+                  if (rawNpmrc !== null) fs.writeFileSync(".npmrc", rawNpmrc);
+                  fs.rmSync(vendorDir, { recursive: true, force: true });
+                  pkgModified = false;
                 } else {
                   execSync(fs.existsSync("package-lock.json") ? "npm ci" : "npm install", { stdio: "inherit" });
                 }
