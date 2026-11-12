@@ -3,11 +3,15 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import * as publicEntry from '../src/index.mjs'
 import {
   parseSemver,
   compareSemver,
   isVersionSatisfied,
+  resolveCiRegistryContext,
+  isPrivateRegistryUrl,
   extractScopedDependencies,
+  checkPackageAvailability,
   waitForAllDependencies,
   patchDockerfileVendorTarballs
 } from '../src/waitForDeps.mjs'
@@ -15,6 +19,19 @@ import { scanRepositoryForLeaks } from '../src/sanitizeRepo.mjs'
 import { buildCliBinaries } from '../src/buildBin.mjs'
 
 describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
+  it('exports all public helpers cleanly from src/index.mjs', () => {
+    assert.equal(typeof publicEntry.parseSemver, 'function')
+    assert.equal(typeof publicEntry.compareSemver, 'function')
+    assert.equal(typeof publicEntry.isVersionSatisfied, 'function')
+    assert.equal(typeof publicEntry.resolveCiRegistryContext, 'function')
+    assert.equal(typeof publicEntry.isPrivateRegistryUrl, 'function')
+    assert.equal(typeof publicEntry.extractScopedDependencies, 'function')
+    assert.equal(typeof publicEntry.checkPackageAvailability, 'function')
+    assert.equal(typeof publicEntry.waitForAllDependencies, 'function')
+    assert.equal(typeof publicEntry.patchDockerfileVendorTarballs, 'function')
+    assert.equal(typeof publicEntry.scanRepositoryForLeaks, 'function')
+  })
+
   it('builds CLI binaries into bin/ dynamically via buildCliBinaries (prepack / build)', () => {
     const tmpBin = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-workflows-bin-'))
     try {
@@ -27,6 +44,7 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
       fs.rmSync(tmpBin, { recursive: true, force: true })
     }
   })
+
   it('scans non-git directories (e.g. inside node:22-alpine Docker build context) without throwing git ENOENT', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-nogit-'))
     try {
@@ -38,6 +56,7 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
       fs.rmSync(tmp, { recursive: true, force: true })
     }
   })
+
   it('parses and compares SemVer ranges accurately (^, ~, >=, exact)', () => {
     assert.deepEqual(parseSemver('^1.2.0'), { major: 1, minor: 2, patch: 0 })
     assert.equal(compareSemver('1.2.0', '1.1.9'), 1)
@@ -52,26 +71,51 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     assert.equal(isVersionSatisfied('1.3.0', '~1.2.0'), false)
   })
 
-  it('extracts @gkucmierz/* dependencies from package.json and sub-packages', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wait-deps-test-'))
+  it('resolves scopePrefix, repoOwner, and fallbackRegistryUrl dynamically from .npmrc, CI env, or package.json', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wait-deps-ctx-'))
     try {
+      fs.writeFileSync(
+        path.join(tmp, '.npmrc'),
+        '@acme:registry=https://git.example.com/api/packages/acme/npm/\n'
+      )
       fs.writeFileSync(
         path.join(tmp, 'package.json'),
         JSON.stringify({
+          name: 'my-web-app',
           dependencies: {
-            '@gkucmierz/blog-engine': '^1.2.0',
+            '@acme/nano-ui': '^1.2.0',
             vue: '^3.5.13'
           },
           devDependencies: {
-            '@gkucmierz/dport': '^1.6.0'
+            '@acme/utils': '^1.6.0'
           }
         })
       )
+
+      const ctx = resolveCiRegistryContext(tmp, { env: {} })
+      assert.equal(ctx.repoOwner, 'acme')
+      assert.equal(ctx.scopePrefix, '@acme/')
+      assert.equal(ctx.serverOrigin, 'https://git.example.com')
+      assert.equal(ctx.fallbackRegistryUrl, 'https://git.example.com/api/packages/acme/npm')
+
       const deps = extractScopedDependencies(tmp)
       assert.deepEqual(deps, [
-        { name: '@gkucmierz/blog-engine', range: '^1.2.0' },
-        { name: '@gkucmierz/dport', range: '^1.6.0' }
+        { name: '@acme/nano-ui', range: '^1.2.0' },
+        { name: '@acme/utils', range: '^1.6.0' }
       ])
+
+      const envCtx = resolveCiRegistryContext(tmp, {
+        env: {
+          GITHUB_SERVER_URL: 'https://gitea.internal.example',
+          GITHUB_REPOSITORY: 'orgx/service-a'
+        }
+      })
+      assert.equal(envCtx.repoOwner, 'orgx')
+      assert.equal(envCtx.serverOrigin, 'https://gitea.internal.example')
+
+      assert.equal(isPrivateRegistryUrl('https://git.example.com/api/packages/acme/npm/pkg'), true)
+      assert.equal(isPrivateRegistryUrl('http://gitea:3000/api/packages/acme/npm/pkg'), true)
+      assert.equal(isPrivateRegistryUrl('https://registry.npmjs.org/@acme%2fnano-ui'), false)
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true })
     }
@@ -103,7 +147,7 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     }
 
     const res = await waitForAllDependencies(
-      [{ name: '@gkucmierz/blog-engine', range: '^1.2.0' }],
+      [{ name: '@acme/utils', range: '^1.2.0' }],
       {
         timeoutMs: 5000,
         pollIntervalMs: 10,
@@ -120,16 +164,23 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
   })
 
   it('resolves immediately from Gitea Packages fallback when npmjs only has an older version (even when Gitea returns HTTP 405 on HEAD)', async () => {
+    const seenAuthByHost = new Map()
     const fakeFetch = async (url, opts) => {
-      const isGitea = String(url).includes('gitea.7u.pl')
+      const host = new URL(url).host
+      seenAuthByHost.set(host, Boolean(opts?.headers?.Authorization))
+      const isGitea = String(url).includes('git.example.com')
       if (opts?.method === 'HEAD') {
         // Real Gitea NPM Packages registry returns 405 Method Not Allowed on HEAD for .tgz tarballs
         return { ok: !isGitea, status: isGitea ? 405 : 200 }
       }
       const versions = isGitea
         ? {
-            '1.7.9': { dist: { tarball: 'https://gitea.7u.pl/nano-ui-1.7.9.tgz' } },
-            '1.8.3': { dist: { tarball: 'https://gitea.7u.pl/nano-ui-1.8.3.tgz' } }
+            '1.7.9': {
+              dist: { tarball: 'https://git.example.com/api/packages/acme/npm/nano-ui-1.7.9.tgz' }
+            },
+            '1.8.3': {
+              dist: { tarball: 'https://git.example.com/api/packages/acme/npm/nano-ui-1.8.3.tgz' }
+            }
           }
         : {
             '1.7.9': { dist: { tarball: 'https://registry.npmjs.org/nano-ui-1.7.9.tgz' } }
@@ -144,11 +195,20 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
       }
     }
 
+    const directPriv = await checkPackageAvailability('@acme/nano-ui', '^1.8.3', {
+      registryUrl: 'https://git.example.com/api/packages/acme/npm',
+      authToken: 'test-token',
+      fetchImpl: fakeFetch
+    })
+    assert.equal(directPriv.available, true)
+    assert.equal(seenAuthByHost.get('git.example.com'), true)
+
     const res = await waitForAllDependencies(
-      [{ name: '@gkucmierz/nano-ui', range: '^1.8.3' }],
+      [{ name: '@acme/nano-ui', range: '^1.8.3' }],
       {
         timeoutMs: 5000,
         pollIntervalMs: 10,
+        fallbackRegistryUrl: 'https://git.example.com/api/packages/acme/npm',
         fetchImpl: fakeFetch,
         sleepImpl: async () => {},
         logger: { log: () => {} }
@@ -158,13 +218,16 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     assert.equal(res.ok, true)
     assert.equal(res.attempts, 1)
     assert.equal(res.resolved[0].matchedVersion, '1.8.3')
+    assert.equal(seenAuthByHost.get('registry.npmjs.org'), false)
   })
 
-  it('validates shell syntax (-n) of all run blocks in reusable workflows and executes OSS Sanitization Gate cleanly (including inside node:22-alpine without bash)', async () => {
+  it('validates shell syntax (-n) and embedded node -e JS syntax of all run blocks in reusable workflows and executes OSS Sanitization Gate cleanly', async () => {
     const { execFileSync, spawnSync } = await import('node:child_process')
+    const vm = await import('node:vm')
     const shellBin = spawnSync('bash', ['--version']).status === 0 ? 'bash' : 'sh'
     const rootDir = path.resolve(import.meta.dirname, '..')
     const workflowFiles = [
+      '.gitea/workflows/deploy.yml',
       '.gitea/workflows/publish-package.yml',
       '.gitea/workflows/git-mirror-sync.yml',
       '.gitea/workflows/zero-downtime-deploy.yml',
@@ -176,6 +239,7 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
       'zero-downtime-swap/action.yml'
     ]
 
+    let verifiedNodeBlocks = 0
     for (const rel of workflowFiles) {
       const content = fs.readFileSync(path.join(rootDir, rel), 'utf8')
       const runBlocks = [...content.matchAll(/run:\s*\|\n((?:(?:[ ]{8,}.*|[ ]*)\n?)+)/g)]
@@ -191,11 +255,22 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
           .replace(/\$\{\{[^}]+\}\}/g, 'dummy_val')
         // Verify shell syntax has no unescaped quotes or unexpected tokens
         execFileSync(shellBin, ['-n', '-c', script], { encoding: 'utf8' })
+
+        // Also parse every embedded single-quoted `node -e '...'` script with V8 vm.Script
+        for (const nodeMatch of script.matchAll(/node -e '([\s\S]*?)'/g)) {
+          // eslint-disable-next-line no-new
+          new vm.Script(nodeMatch[1], { filename: `${rel}#inline-node` })
+          verifiedNodeBlocks++
+        }
       }
     }
+    assert.ok(verifiedNodeBlocks >= 10, `Expected >= 10 inline node -e blocks, got ${verifiedNodeBlocks}`)
 
-    // Also execute the first run block (OSS Sanitization Gate) of publish-package.yml
-    const publishYml = fs.readFileSync(path.join(rootDir, '.gitea/workflows/publish-package.yml'), 'utf8')
+    // Execute the first run block (OSS Sanitization Gate) of publish-package.yml
+    const publishYml = fs.readFileSync(
+      path.join(rootDir, '.gitea/workflows/publish-package.yml'),
+      'utf8'
+    )
     const firstRunMatch = publishYml.match(/run:\s*\|\n((?:[ ]{10,}.*\n?)+)/)
     const sanitizeScript = firstRunMatch[1]
       .split('\n')
@@ -207,11 +282,22 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     })
     assert.match(out, /\[oss-sanitize-gate\] Clean/)
 
-    // Verify zero-downtime-deploy.yml picks highest SemVer across registries and supports .yml/.yaml self-heal workflows
+    // Verify both publish-package.yml and zero-downtime-deploy.yml accept dynamic zero-knowledge inputs
     const deployYml = fs.readFileSync(
       path.join(rootDir, '.gitea/workflows/zero-downtime-deploy.yml'),
       'utf8'
     )
+    for (const inputName of [
+      'gitea_owner:',
+      'package_scope:',
+      'private_registry_url:',
+      'internal_packages:'
+    ]) {
+      assert.ok(publishYml.includes(inputName), `Missing ${inputName} in publish-package.yml`)
+      assert.ok(deployYml.includes(inputName), `Missing ${inputName} in zero-downtime-deploy.yml`)
+    }
+
+    // Verify zero-downtime-deploy.yml picks highest SemVer across registries and supports .yml/.yaml self-heal workflows
     assert.match(deployYml, /cmp\(b\.version,\s*a\.version\)/)
     assert.match(deployYml, /b\.prio\s*-\s*a\.prio/)
     for (const wfName of [
@@ -227,6 +313,68 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
 
     // Verify nginx -s reload closes stdin & stdout/stderr pipes to prevent 3h act_runner hangs
     assert.match(deployYml, /nginx -s reload <\/dev\/null >\/dev\/null 2>&1/)
+  })
+
+  it('enforces Public OSS Zero-Leak invariant across all workflows, actions, CLI sources, UI, and README', () => {
+    const rootDir = path.resolve(import.meta.dirname, '..')
+    const publicFiles = [
+      '.gitea/workflows/deploy.yml',
+      '.gitea/workflows/publish-package.yml',
+      '.gitea/workflows/zero-downtime-deploy.yml',
+      '.gitea/workflows/git-mirror-sync.yml',
+      '.gitea/workflows/trigger-downstream.yml',
+      '.gitea/workflows/scheduled-container-job.yml',
+      'wait-for-deps/action.yml',
+      'publish-npm-dual/action.yml',
+      'zero-downtime-swap/action.yml',
+      'oss-sanitize-gate/action.yml',
+      'src/waitForDeps.mjs',
+      'src/buildBin.mjs',
+      'src/sanitizeRepo.mjs',
+      'src/index.mjs',
+      'bin/wait-for-deps.mjs',
+      'bin/sanitize-check.mjs',
+      'ui/App.vue',
+      'README.md'
+    ]
+
+    const forbiddenLiterals = [
+      'UNSCOPED_INTERNAL_PKGS',
+      'i18n-scroll-restore',
+      'vue-url-cleaner',
+      'vue-minisearch',
+      'social-links',
+      'science-blog',
+      'virtual-keyboard',
+      'fuel-index',
+      'mem-index',
+      'music-app',
+      'dashboard-app',
+      'blog-engine',
+      'gitea.7u.pl',
+      'ci.7u.pl',
+      '7u.pl'
+    ]
+
+    const hits = []
+    for (const rel of publicFiles) {
+      const content = fs.readFileSync(path.join(rootDir, rel), 'utf8')
+      for (const token of forbiddenLiterals) {
+        if (content.includes(token)) {
+          hits.push(`${rel}: contains forbidden internal identifier "${token}"`)
+        }
+      }
+      // Outside ui/App.vue's real @gkucmierz/nano-ui component import, only ci-workflows's own identity may appear
+      const stripped = content
+        .replace("import { NanoSwitch, NanoSelect } from '@gkucmierz/nano-ui'", '')
+        .replaceAll('@gkucmierz/ci-workflows', '')
+        .replaceAll('gkucmierz/ci-workflows', '')
+      if (stripped.includes('@gkucmierz/')) {
+        hits.push(`${rel}: contains hardcoded @gkucmierz/ scope outside @gkucmierz/ci-workflows`)
+      }
+    }
+
+    assert.deepEqual(hits, [])
   })
 
   it('should patch both single-root SPA Dockerfiles and multi-directory fullstack Dockerfiles (ui/server/crawler) with exact vendor-tarballs paths', () => {
