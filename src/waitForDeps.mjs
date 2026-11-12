@@ -76,13 +76,178 @@ export const isVersionSatisfied = (candidateVersion, rangeSpec) => {
 }
 
 /**
- * Scans `rootDir` (and standard subpackages `ui`, `server`, `crawler`) for `package.json`
- * and extracts all dependencies matching `scopePrefix` (default `@gkucmierz/`).
+ * Normalizes a scope string (`acme`, `@acme`, `@acme/`) to `@acme/`, or `''` if empty.
  */
-export const extractScopedDependencies = (
-  rootDir = process.cwd(),
-  scopePrefix = '@gkucmierz/'
-) => {
+export const normalizeScopePrefix = (rawScope) => {
+  const trimmed = String(rawScope || '').trim()
+  if (!trimmed) return ''
+  const withAt = trimmed.startsWith('@') ? trimmed : `@${trimmed}`
+  return withAt.endsWith('/') ? withAt : `${withAt}/`
+}
+
+const parseOriginSafe = (urlStr) => {
+  try {
+    return urlStr ? new URL(String(urlStr).trim()).origin : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Dynamically resolves CI owner, scope prefix, server origin, and private NPM registry URL
+ * from explicit overrides, Gitea/GitHub Actions env vars, `.npmrc`, and `package.json`.
+ */
+export const resolveCiRegistryContext = (rootDir = process.cwd(), overrides = {}) => {
+  const env = overrides.env || process.env
+  const subDirs = ['.', 'ui', 'server', 'crawler', 'client', 'app', 'web']
+
+  let npmrcScope = ''
+  let npmrcRegistry = ''
+  for (const sub of subDirs) {
+    const npmrcPath = path.join(rootDir, sub, '.npmrc')
+    if (!fs.existsSync(npmrcPath)) continue
+    try {
+      const lines = fs.readFileSync(npmrcPath, 'utf8').split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';')) continue
+        const scopedMatch = trimmed.match(/^(@[^:=\s]+):registry\s*=\s*(\S+)/)
+        if (scopedMatch) {
+          if (!npmrcScope) npmrcScope = scopedMatch[1]
+          if (!npmrcRegistry && !scopedMatch[2].includes('registry.npmjs.org')) {
+            npmrcRegistry = scopedMatch[2]
+          }
+          continue
+        }
+        const plainMatch = trimmed.match(/^registry\s*=\s*(\S+)/)
+        if (plainMatch && !plainMatch[1].includes('registry.npmjs.org') && !npmrcRegistry) {
+          npmrcRegistry = plainMatch[1]
+        }
+      }
+    } catch {
+      // Ignore unreadable .npmrc
+    }
+  }
+
+  let pkgScope = ''
+  for (const sub of subDirs) {
+    const pkgPath = path.join(rootDir, sub, 'package.json')
+    if (!fs.existsSync(pkgPath)) continue
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+      if (pkg?.name && String(pkg.name).startsWith('@') && String(pkg.name).includes('/')) {
+        pkgScope = String(pkg.name).split('/')[0]
+        break
+      }
+    } catch {
+      // Ignore malformed package.json
+    }
+  }
+
+  const npmrcOwnerMatch = npmrcRegistry.match(/\/api\/packages\/([^/]+)\/npm/i)
+  const npmrcOwner = npmrcOwnerMatch ? decodeURIComponent(npmrcOwnerMatch[1]) : ''
+  const repoFull = String(env.GITEA_REPO_FULL || env.GITHUB_REPOSITORY || '').trim()
+  const repoSlugOwner = repoFull.includes('/') ? repoFull.split('/')[0].trim() : ''
+  const pkgScopeOwner = pkgScope ? pkgScope.replace(/^@/, '') : ''
+
+  const repoOwner = String(
+    overrides.repoOwner ||
+      env.GITEA_OWNER_INPUT ||
+      env.GITHUB_REPOSITORY_OWNER ||
+      repoSlugOwner ||
+      npmrcOwner ||
+      pkgScopeOwner ||
+      ''
+  ).trim()
+
+  const scopePrefix =
+    normalizeScopePrefix(
+      overrides.scopePrefix || env.WAIT_FOR_DEPS_SCOPE || env.PACKAGE_SCOPE_INPUT
+    ) ||
+    normalizeScopePrefix(npmrcScope) ||
+    (repoOwner ? `@${repoOwner}/` : '') ||
+    normalizeScopePrefix(pkgScope)
+
+  const serverOrigin =
+    parseOriginSafe(overrides.serverUrl || env.GITEA_SERVER_URL || env.GITHUB_SERVER_URL) ||
+    parseOriginSafe(
+      overrides.privateRegistryUrl ||
+        env.WAIT_FOR_DEPS_FALLBACK_REGISTRY ||
+        env.PRIVATE_REGISTRY_INPUT ||
+        npmrcRegistry
+    )
+
+  let fallbackRegistryUrl = null
+  if (
+    Object.prototype.hasOwnProperty.call(overrides, 'fallbackRegistryUrl') &&
+    overrides.fallbackRegistryUrl !== undefined
+  ) {
+    fallbackRegistryUrl = overrides.fallbackRegistryUrl
+  } else {
+    const rawFallback =
+      overrides.privateRegistryUrl ||
+      env.WAIT_FOR_DEPS_FALLBACK_REGISTRY ||
+      env.PRIVATE_REGISTRY_INPUT ||
+      npmrcRegistry ||
+      (serverOrigin && repoOwner && !serverOrigin.includes('github.com')
+        ? `${serverOrigin}/api/packages/${repoOwner}/npm`
+        : '')
+    fallbackRegistryUrl = rawFallback ? String(rawFallback).trim().replace(/\/+$/, '') : null
+  }
+
+  return {
+    repoOwner,
+    scopePrefix,
+    serverOrigin,
+    fallbackRegistryUrl
+  }
+}
+
+/**
+ * Detects whether a registry or tarball URL belongs to a private / self-hosted Gitea registry
+ * (never matches public `registry.npmjs.org` or `registry.yarnpkg.com`).
+ */
+export const isPrivateRegistryUrl = (urlStr, env = process.env) => {
+  const raw = String(urlStr || '').trim()
+  if (!raw) return false
+  let parsedHost = ''
+  try {
+    parsedHost = new URL(raw).host.toLowerCase()
+  } catch {
+    return raw.includes('/api/packages/') || raw.includes('gitea:3000')
+  }
+  if (!parsedHost || parsedHost === 'registry.npmjs.org' || parsedHost === 'registry.yarnpkg.com') {
+    return false
+  }
+  if (raw.includes('/api/packages/') || parsedHost === 'gitea:3000') {
+    return true
+  }
+  for (const candidate of [
+    env.GITEA_SERVER_URL,
+    env.GITHUB_SERVER_URL,
+    env.PRIVATE_REGISTRY_INPUT,
+    env.WAIT_FOR_DEPS_FALLBACK_REGISTRY
+  ]) {
+    if (!candidate) continue
+    try {
+      const ch = new URL(String(candidate).trim()).host.toLowerCase()
+      if (ch && ch !== 'github.com' && ch === parsedHost) return true
+    } catch {
+      // Ignore invalid URL env
+    }
+  }
+  return false
+}
+
+/**
+ * Scans `rootDir` (and standard subpackages `ui`, `server`, `crawler`) for `package.json`
+ * and extracts all dependencies matching `scopePrefix` (dynamically detected when omitted).
+ */
+export const extractScopedDependencies = (rootDir = process.cwd(), scopePrefix = '') => {
+  const effectiveScope =
+    normalizeScopePrefix(scopePrefix) || resolveCiRegistryContext(rootDir).scopePrefix
+  if (!effectiveScope) return []
+
   const candidateFiles = [
     path.join(rootDir, 'package.json'),
     path.join(rootDir, 'ui', 'package.json'),
@@ -101,7 +266,7 @@ export const extractScopedDependencies = (
         ...(pkg.devDependencies || {})
       }
       for (const [depName, rangeSpec] of Object.entries(merged)) {
-        if (!depName.startsWith(scopePrefix)) continue
+        if (!depName.startsWith(effectiveScope)) continue
         if (String(rangeSpec).startsWith('file:') || String(rangeSpec).startsWith('workspace:')) {
           continue
         }
@@ -120,26 +285,30 @@ export const extractScopedDependencies = (
 
 /**
  * Checks whether at least one version satisfying `range` is published AND its tarball is reachable
- * on the NPM registry (`https://registry.npmjs.org`).
+ * on the target NPM registry.
  */
 export const checkPackageAvailability = async (
   pkgName,
   range,
   {
     registryUrl = 'https://registry.npmjs.org',
-    authToken = process.env.GITEA_PKG_TOKEN || process.env.LOCAL_PACKAGE_REGISTRY || process.env.GITEA_TOKEN || '',
+    authToken = process.env.GITEA_PKG_TOKEN ||
+      process.env.LOCAL_PACKAGE_REGISTRY ||
+      process.env.GITEA_TOKEN ||
+      '',
+    isPrivateRegistry = false,
     fetchImpl = globalThis.fetch
   } = {}
 ) => {
   const encodedName = pkgName.replace('/', '%2f')
   const url = `${registryUrl.replace(/\/$/, '')}/${encodedName}?t=${Date.now()}`
-  const isGiteaReg = String(url).includes('gitea.7u.pl') || String(url).includes('gitea:3000')
+  const isPrivReg = isPrivateRegistry || isPrivateRegistryUrl(url)
   const reqHeaders = {
     Accept: 'application/json',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     Pragma: 'no-cache'
   }
-  if (authToken && isGiteaReg) {
+  if (authToken && isPrivReg && !url.includes('registry.npmjs.org')) {
     reqHeaders.Authorization = `token ${authToken}`
   }
 
@@ -159,7 +328,8 @@ export const checkPackageAvailability = async (
     const data = await res.json()
     const versionsObj = data?.versions || {}
     const allVersions = Object.keys(versionsObj).sort(compareSemver)
-    const latestVersion = data?.['dist-tags']?.latest || allVersions[allVersions.length - 1] || null
+    const latestVersion =
+      data?.['dist-tags']?.latest || allVersions[allVersions.length - 1] || null
 
     const matchingVersions = allVersions.filter((v) => isVersionSatisfied(v, range))
     if (matchingVersions.length === 0) {
@@ -175,10 +345,11 @@ export const checkPackageAvailability = async (
     const tarballUrl = versionsObj[bestMatch]?.dist?.tarball
 
     if (tarballUrl) {
-      const tarballHeaders =
-        authToken && (String(tarballUrl).includes('gitea.7u.pl') || String(tarballUrl).includes('gitea:3000'))
-          ? { Authorization: `token ${authToken}` }
-          : {}
+      const sendAuthForTarball =
+        Boolean(authToken) &&
+        !String(tarballUrl).includes('registry.npmjs.org') &&
+        (isPrivReg || isPrivateRegistryUrl(tarballUrl))
+      const tarballHeaders = sendAuthForTarball ? { Authorization: `token ${authToken}` } : {}
       const headRes = await fetchImpl(tarballUrl, { method: 'HEAD', headers: tarballHeaders })
       if (!headRes.ok && headRes.status !== 405) {
         return {
@@ -218,14 +389,14 @@ export const waitForAllDependencies = async (
     timeoutMs = 180e3,
     pollIntervalMs = 5e3,
     registryUrl = 'https://registry.npmjs.org',
-    fallbackRegistryUrl = 'https://gitea.7u.pl/api/packages/gkucmierz/npm',
+    fallbackRegistryUrl = resolveCiRegistryContext().fallbackRegistryUrl,
     fetchImpl = globalThis.fetch,
     sleepImpl = (ms) => new Promise((r) => setTimeout(r, ms)),
     logger = console
   } = {}
 ) => {
   if (!deps || deps.length === 0) {
-    logger.log('✅ [wait-for-deps] Brak zewnętrznych zależności @gkucmierz/* do weryfikacji.')
+    logger.log('✅ [wait-for-deps] Brak zewnętrznych zależności wewnętrznych do weryfikacji.')
     return { ok: true, resolved: [] }
   }
 
@@ -246,6 +417,7 @@ export const waitForAllDependencies = async (
       if (!status.available && fallbackRegistryUrl && fallbackRegistryUrl !== registryUrl) {
         const giteaStatus = await checkPackageAvailability(dep.name, dep.range, {
           registryUrl: fallbackRegistryUrl,
+          isPrivateRegistry: true,
           fetchImpl
         })
         if (giteaStatus.available) {
@@ -273,16 +445,16 @@ export const waitForAllDependencies = async (
     if (pending.length === 0) {
       for (const r of resolved) {
         const regLabel = r.source === 'fallback' ? 'Gitea Packages' : 'npmjs.org'
-        logger.log(`✅ [wait-for-deps] ${r.name}@${r.range} -> dostępny w ${regLabel} (${r.matchedVersion})`)
+        logger.log(
+          `✅ [wait-for-deps] ${r.name}@${r.range} -> dostępny w ${regLabel} (${r.matchedVersion})`
+        )
       }
       return { ok: true, resolved, attempts: attempt }
     }
 
     const elapsedMs = Date.now() - startTime
     if (elapsedMs + pollIntervalMs > timeoutMs) {
-      const details = pending
-        .map((p) => `${p.name}@${p.range} (${p.reason})`)
-        .join(', ')
+      const details = pending.map((p) => `${p.name}@${p.range} (${p.reason})`).join(', ')
       throw new Error(
         `[wait-for-deps] Przekroczono limit czasu (${Math.round(timeoutMs / 1000)}s) oczekiwania na paczki: ${details}`
       )
