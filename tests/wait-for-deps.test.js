@@ -313,6 +313,16 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
 
     // Verify nginx -s reload closes stdin & stdout/stderr pipes to prevent 3h act_runner hangs
     assert.match(deployYml, /nginx -s reload <\/dev\/null >\/dev\/null 2>&1/)
+
+    // Verify publish-package.yml restores raw package.json & .npmrc immediately after npm install (before npm test & npm run build)
+    const installIdx = publishYml.indexOf('execSync("npm install --no-package-lock"')
+    const preTestRestoreIdx = publishYml.indexOf('fs.writeFileSync("package.json", rawPkg)', installIdx)
+    const runTestIdx = publishYml.indexOf('execSync("npm test"', installIdx)
+    const runBuildIdx = publishYml.indexOf('execSync("npm run build"', installIdx)
+    assert.ok(
+      installIdx > 0 && preTestRestoreIdx > installIdx && preTestRestoreIdx < runTestIdx && preTestRestoreIdx < runBuildIdx,
+      'publish-package.yml must restore original package.json immediately after npm install and strictly before npm test / npm run build'
+    )
   })
 
   it('enforces Public OSS Zero-Leak invariant across all workflows, actions, CLI sources, UI, and README', () => {
