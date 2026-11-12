@@ -2,10 +2,13 @@ export {
   parseSemver,
   compareSemver,
   isVersionSatisfied,
+  normalizeScopePrefix,
+  resolveCiRegistryContext,
+  isPrivateRegistryUrl,
   extractScopedDependencies,
-  fetchPublishedVersions,
-  waitForPackageVersion,
-  waitForAllDependencies
+  checkPackageAvailability,
+  waitForAllDependencies,
+  patchDockerfileVendorTarballs
 } from './waitForDeps.mjs'
 
 export { scanRepositoryForLeaks } from './sanitizeRepo.mjs'
