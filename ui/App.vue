@@ -27,19 +27,19 @@ const runsOnOptions = [
 
 // Interactive configurator state
 const cfg = ref({
-  containerName: 'music-app',
+  containerName: 'my-web-app',
   runsOn: 'self-hosted-pl',
   hotSwapStatic: true,
-  healthcheckUrl: 'http://localhost:6162/',
+  healthcheckUrl: 'http://localhost:3000/',
   waitTimeoutSec: 180,
   publishNpmjs: true,
   publishPrivate: true,
   ossSanitizeCheck: true,
-  targetRemoteUrl: 'https://github.com/gkucmierz/ci-workflows.git',
+  targetRemoteUrl: 'https://github.com/acme/my-web-app.git',
   targetBranch: 'main',
   commandScheduled: 'node --experimental-sqlite crawler/src/run.js --scheduled',
   commandManual: 'node --experimental-sqlite crawler/src/run.js',
-  targetRepos: 'gkucmierz/virtual-keyboard,gkucmierz/science-blog',
+  targetRepos: 'acme/web-app,acme/docs-site',
   workflowFile: 'deploy.yml'
 })
 
@@ -85,7 +85,7 @@ const uiText = computed(() =>
           {
             num: '0 ETARGET',
             label: 'Odporność na wyścigi publikacji w NPM',
-            desc: 'Gdy wypychasz jednocześnie bibliotekę @gkucmierz/nano-ui i aplikację, bramka wait-for-deps czeka na propagację nowej wersji w rejestrze przed startem docker compose build.'
+            desc: 'Gdy wypychasz jednocześnie bibliotekę @acme/ui-kit i aplikację, bramka wait-for-deps czeka na propagację nowej wersji w rejestrze przed startem docker compose build.'
           },
           {
             num: '13.3 kB',
@@ -171,7 +171,7 @@ const archetypes = computed(() =>
           title: 'Zero-Downtime App Deploy',
           file: '.gitea/workflows/zero-downtime-deploy.yml',
           summary:
-            'Buduje obraz Docker podczas działania kontenera, czeka w bramce wait-for-deps na publikację zależności @gkucmierz/* w NPM, wykonuje atomowy hot-swap statycznych plików Nginx (zachowując IP w sieci npm_public), odświeża DNS w Nginx Proxy Manager i weryfikuje HTTP 200 smoke-test.',
+            'Buduje obraz Docker podczas działania kontenera, czeka w bramce wait-for-deps na publikację zależności wewnętrznych (@scope/*) w NPM, wykonuje atomowy hot-swap statycznych plików Nginx (zachowując IP w sieci npm_public), odświeża DNS w Nginx Proxy Manager i weryfikuje HTTP 200 smoke-test.',
           highlights: [
             'Brak błędów 502 Bad Gateway przy wdrożeniu (zachowane IP kontenera w sieci npm_public)',
             'Bramka gotowości zależności (wait-for-deps) chroni przed błędem ETARGET',
@@ -213,7 +213,7 @@ const archetypes = computed(() =>
           title: 'Cykliczne Zadanie w Kontenerze (Crawler)',
           file: '.gitea/workflows/scheduled-container-job.yml',
           summary:
-            'Ujednolicony runner dla cyklicznych zadań cron oraz ręcznych wywołań workflow_dispatch wykonywanych wewnątrz działającego kontenera Docker (np. crawlery K-of-N Oracle w fuel-index oraz mem-index).',
+            'Ujednolicony runner dla cyklicznych zadań cron oraz ręcznych wywołań workflow_dispatch wykonywanych wewnątrz działającego kontenera Docker (np. cykliczne workery i crawlery danych w crawler-worker).',
           highlights: [
             'Weryfikacja stanu kontenera (State.Running) przed wywołaniem docker exec',
             'Automatyczne rozróżnienie uruchomienia z harmonogramu (schedule) od ręcznego (workflow_dispatch)',
@@ -227,7 +227,7 @@ const archetypes = computed(() =>
           title: 'Kaskadowe Wyzwalanie Zależnych Projektów',
           file: '.gitea/workflows/trigger-downstream.yml',
           summary:
-            'Po opublikowaniu nowej wersji biblioteki (@gkucmierz/nano-ui, blog-engine) lub pluginu automatycznie wyzwala przebudowę zależnych aplikacji przez REST API Gitei lub GitHuba.',
+            'Po opublikowaniu nowej wersji biblioteki (np. @acme/ui-kit) lub pluginu automatycznie wyzwala przebudowę zależnych aplikacji przez REST API Gitei lub GitHuba.',
           highlights: [
             'Obsługa listy wielu repozytoriów docelowych oddzielonych przecinkami (CSV)',
             'Pełna kontrola błędów HTTP i czytelne logi statusu dla każdego repozytorium',
@@ -243,7 +243,7 @@ const archetypes = computed(() =>
           title: 'Zero-Downtime App Deploy',
           file: '.gitea/workflows/zero-downtime-deploy.yml',
           summary:
-            'Builds the Docker image while the container runs, waits in wait-for-deps for @gkucmierz/* packages on NPM, performs an atomic Nginx static hot-swap (preserving the npm_public IP), reloads Nginx Proxy Manager DNS, and runs an HTTP 200 smoke test.',
+            'Builds the Docker image while the container runs, waits in wait-for-deps for internal @scope/* packages on NPM, performs an atomic Nginx static hot-swap (preserving the npm_public IP), reloads Nginx Proxy Manager DNS, and runs an HTTP 200 smoke test.',
           highlights: [
             'Zero 502 Bad Gateway errors during deploy (container IP on npm_public is preserved)',
             'Pre-build Dependency Readiness Gate (wait-for-deps) prevents ETARGET failures',
@@ -285,7 +285,7 @@ const archetypes = computed(() =>
           title: 'Scheduled Container Job (Crawler)',
           file: '.gitea/workflows/scheduled-container-job.yml',
           summary:
-            'Unified runner for scheduled cron jobs and manual workflow_dispatch runs executed inside a live Docker container (e.g. K-of-N Oracle crawlers in fuel-index and mem-index).',
+            'Unified runner for scheduled cron jobs and manual workflow_dispatch runs executed inside a live Docker container (e.g. scheduled data workers and crawlers inside crawler-worker).',
           highlights: [
             'Verifies container State.Running before invoking docker exec',
             'Automatically distinguishes cron schedule runs from manual workflow_dispatch',
@@ -370,7 +370,7 @@ jobs:
       runs_on: ${c.runsOn}
       oss_sanitize_check: ${c.ossSanitizeCheck}
     secrets:
-      MIRROR_USERNAME: gkucmierz
+      MIRROR_USERNAME: acme
       MIRROR_TOKEN: \${{ secrets.GITHUB_MIRROR_TOKEN }}`
 
     case 'scheduled-container-job':
@@ -420,7 +420,7 @@ const cliAndActionsCatalog = computed(() =>
           kind: 'CLI & Akcja Kompozytowa',
           invocation: 'npx @gkucmierz/ci-workflows wait-for-deps',
           purpose:
-            'Odpytuje registry.npmjs.org co 5 s (maks. 180 s), aż wszystkie wymagane wersje @gkucmierz/* z package.json (root, ui/, server/, crawler/) będą opublikowane i osiągalne.'
+            'Odpytuje registry.npmjs.org co 5 s (maks. 180 s), aż wszystkie wymagane wersje paczek @scope/* z package.json (root, ui/, server/, crawler/) będą opublikowane i osiągalne.'
         },
         {
           name: 'oss-sanitize-check',
@@ -432,21 +432,21 @@ const cliAndActionsCatalog = computed(() =>
         {
           name: 'oss-sanitize-gate',
           kind: 'Akcja Kompozytowa Gitea / GitHub',
-          invocation: 'uses: https://gitea.7u.pl/gkucmierz/ci-workflows/oss-sanitize-gate@main',
+          invocation: 'uses: gkucmierz/ci-workflows/oss-sanitize-gate@main',
           purpose:
             'Uruchamia automatycznie wykryte testy jednostkowe (npm test) oraz skaner bezpieczeństwa oss-sanitize-check jako pojedynczy krok w dowolnym jobie CI.'
         },
         {
           name: 'publish-npm-dual',
           kind: 'Akcja Kompozytowa Gitea / GitHub',
-          invocation: 'uses: https://gitea.7u.pl/gkucmierz/ci-workflows/publish-npm-dual@main',
+          invocation: 'uses: gkucmierz/ci-workflows/publish-npm-dual@main',
           purpose:
             'Weryfikuje czysty tarball (npm pack --dry-run), sprawdza przez HTTP czy wersja już istnieje na registry.npmjs.org i publikuje paczkę równolegle na npmjs.org oraz Gitea Packages.'
         },
         {
           name: 'zero-downtime-swap',
           kind: 'Akcja Kompozytowa Gitea / GitHub',
-          invocation: 'uses: https://gitea.7u.pl/gkucmierz/ci-workflows/zero-downtime-swap@main',
+          invocation: 'uses: gkucmierz/ci-workflows/zero-downtime-swap@main',
           purpose:
             'Buduje obraz Docker przy działającym kontenerze, podmienia /usr/share/nginx/html przez katalog tymczasowy, wykonuje nginx -s reload (0 ms przestoju), odświeża DNS w Nginx Proxy Manager i sprawdza healthcheck_url.'
         }
@@ -457,7 +457,7 @@ const cliAndActionsCatalog = computed(() =>
           kind: 'CLI & Composite Action',
           invocation: 'npx @gkucmierz/ci-workflows wait-for-deps',
           purpose:
-            'Polls registry.npmjs.org every 5s (up to 180s) until all @gkucmierz/* versions required by package.json (root, ui/, server/, crawler/) are published and reachable.'
+            'Polls registry.npmjs.org every 5s (up to 180s) until all internal @scope/* versions required by package.json (root, ui/, server/, crawler/) are published and reachable.'
         },
         {
           name: 'oss-sanitize-check',
@@ -469,21 +469,21 @@ const cliAndActionsCatalog = computed(() =>
         {
           name: 'oss-sanitize-gate',
           kind: 'Gitea / GitHub Composite Action',
-          invocation: 'uses: https://gitea.7u.pl/gkucmierz/ci-workflows/oss-sanitize-gate@main',
+          invocation: 'uses: gkucmierz/ci-workflows/oss-sanitize-gate@main',
           purpose:
             'Runs auto-detected unit tests (npm test) followed by the oss-sanitize-check OPSEC scanner as a single reusable CI step.'
         },
         {
           name: 'publish-npm-dual',
           kind: 'Gitea / GitHub Composite Action',
-          invocation: 'uses: https://gitea.7u.pl/gkucmierz/ci-workflows/publish-npm-dual@main',
+          invocation: 'uses: gkucmierz/ci-workflows/publish-npm-dual@main',
           purpose:
             'Verifies clean tarball contents (npm pack --dry-run), checks if the version already exists on registry.npmjs.org, and publishes to both npmjs.org and Gitea Packages.'
         },
         {
           name: 'zero-downtime-swap',
           kind: 'Gitea / GitHub Composite Action',
-          invocation: 'uses: https://gitea.7u.pl/gkucmierz/ci-workflows/zero-downtime-swap@main',
+          invocation: 'uses: gkucmierz/ci-workflows/zero-downtime-swap@main',
           purpose:
             'Builds Docker image while container stays live, copies /usr/share/nginx/html via host staging dir, runs nginx -s reload (0ms downtime), refreshes Nginx Proxy Manager DNS, and checks healthcheck_url.'
         }
