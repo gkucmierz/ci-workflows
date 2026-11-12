@@ -9,18 +9,25 @@ const binDir = path.join(rootDir, 'bin')
 const WAIT_FOR_DEPS_BIN = `#!/usr/bin/env node
 import fs from 'node:fs'
 import path from 'node:path'
-import { extractScopedDependencies, waitForAllDependencies } from '../src/waitForDeps.mjs'
+import {
+  resolveCiRegistryContext,
+  extractScopedDependencies,
+  waitForAllDependencies
+} from '../src/waitForDeps.mjs'
 
 const rootDir = process.argv[2] || process.cwd()
 const timeoutSec = Number(process.env.WAIT_FOR_DEPS_TIMEOUT_SEC || 180)
 const intervalSec = Number(process.env.WAIT_FOR_DEPS_INTERVAL_SEC || 5)
-const scopePrefix = process.env.WAIT_FOR_DEPS_SCOPE || '@gkucmierz/'
+const ctx = resolveCiRegistryContext(rootDir, {
+  scopePrefix: process.env.WAIT_FOR_DEPS_SCOPE || ''
+})
 
 const main = async () => {
-  const deps = extractScopedDependencies(rootDir, scopePrefix)
+  const deps = extractScopedDependencies(rootDir, ctx.scopePrefix)
   const res = await waitForAllDependencies(deps, {
     timeoutMs: timeoutSec * 1000,
-    pollIntervalMs: intervalSec * 1000
+    pollIntervalMs: intervalSec * 1000,
+    fallbackRegistryUrl: ctx.fallbackRegistryUrl
   })
 
   const fallbackDeps = (res.resolved || []).filter((r) => r.source === 'fallback' && r.tarballUrl)
