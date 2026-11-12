@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       target_remote_url:
-        description: 'Docelowy URL repozytorium (np. https://github.com/user/repo.git lub https://gitee.com/user/repo.git)'
+        description: 'Docelowy URL repozytorium (np. https://github.com/acme/my-web-app.git lub https://gitee.com/acme/my-web-app.git)'
         required: true
         type: string
       target_branch:
@@ -33,7 +33,7 @@ on:
 jobs:
   mirror:
     name: Sanitize & Mirror to External Git
-    runs-on: self-hosted-pl
+    runs-on: ${{ inputs.runs_on || 'self-hosted-pl' }}
     timeout-minutes: 10
     steps:
       - name: Checkout full repository history
@@ -43,6 +43,10 @@ jobs:
 
       - name: Dual-SSoT Privacy & OSS Sanitization Gate
         if: ${{ inputs.oss_sanitize_check }}
+        env:
+          GITEA_SERVER_URL: ${{ github.server_url }}
+          GITEA_API_URL: ${{ github.api_url }}
+          GITEA_REPO_FULL: ${{ github.repository }}
         run: |
           node -e '
           const { execFileSync } = require("child_process");
@@ -56,12 +60,15 @@ jobs:
                 process.exit(1);
               }
             }
-            const repoFull = process.env.GITHUB_REPOSITORY || "";
-            if (repoFull.includes("/")) {
+            const repoFull = String(process.env.GITEA_REPO_FULL || process.env.GITHUB_REPOSITORY || "").trim();
+            let srv = "";
+            try { srv = new URL(String(process.env.GITEA_SERVER_URL || process.env.GITHUB_SERVER_URL || "").trim()).origin; } catch {}
+            const apiBase = (String(process.env.GITEA_API_URL || process.env.GITHUB_API_URL || "").trim() || (srv ? srv + "/api/v1" : "")).replace(/\/+$/, "");
+            if (repoFull.includes("/") && apiBase) {
               try {
-                const res = await fetch(`https://gitea.7u.pl/api/v1/repos/${repoFull}`);
+                const res = await fetch(`${apiBase}/repos/${repoFull}`);
                 if (res.status !== 200) {
-                  console.error(`❌ [Privacy Gate] Mirror aborted: Repository ${repoFull} is PRIVATE on Gitea (HTTP ${res.status}).`);
+                  console.error(`❌ [Privacy Gate] Mirror aborted: Repository ${repoFull} is PRIVATE (HTTP ${res.status}).`);
                   process.exit(1);
                 }
               } catch {}

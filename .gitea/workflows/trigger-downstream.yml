@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       target_repos:
-        description: 'Lista repozytoriów docelowych oddzielona przecinkami (np. gkucmierz/virtual-keyboard,gkucmierz/science-blog)'
+        description: 'Lista repozytoriów docelowych oddzielona przecinkami (np. acme/web-app,acme/docs-site)'
         required: true
         type: string
       workflow_file:
@@ -18,10 +18,10 @@ on:
         type: string
         default: 'main'
       api_base_url:
-        description: 'Bazowy URL API Gitei lub GitHuba'
+        description: 'Bazowy URL API Gitei lub GitHuba (domyślnie wykrywany z kontekstu serwera)'
         required: false
         type: string
-        default: 'https://gitea.7u.pl/api/v1'
+        default: ''
       runs_on:
         description: 'Etykieta runnera Gitea'
         required: false
@@ -35,7 +35,7 @@ on:
 jobs:
   dispatch:
     name: Trigger Downstream Workflows
-    runs-on: self-hosted-pl
+    runs-on: ${{ inputs.runs_on || 'self-hosted-pl' }}
     timeout-minutes: 5
     steps:
       - name: Dispatch downstream repository workflows
@@ -44,6 +44,8 @@ jobs:
           WORKFLOW_FILE: ${{ inputs.workflow_file }}
           TARGET_REF: ${{ inputs.target_ref }}
           API_BASE: ${{ inputs.api_base_url }}
+          GITEA_SERVER_URL: ${{ github.server_url }}
+          GITEA_API_URL: ${{ github.api_url }}
           PAT: ${{ secrets.DISPATCH_PAT }}
         run: |
           node -e '
@@ -56,7 +58,17 @@ jobs:
             const repos = (process.env.TARGET_REPOS || "").split(",").map(s => s.trim()).filter(Boolean);
             const wf = process.env.WORKFLOW_FILE || "deploy.yml";
             const ref = process.env.TARGET_REF || "main";
-            const apiBase = (process.env.API_BASE || "https://gitea.7u.pl/api/v1").replace(/\/+$/, "");
+            const srv = (process.env.GITEA_SERVER_URL || process.env.GITHUB_SERVER_URL || "").trim().replace(/\/+$/, "");
+            const apiBase = (
+              process.env.API_BASE ||
+              process.env.GITEA_API_URL ||
+              process.env.GITHUB_API_URL ||
+              (srv ? `${srv}/api/v1` : "")
+            ).trim().replace(/\/+$/, "");
+            if (!apiBase) {
+              console.error("❌ Unable to resolve API base URL (set api_base_url input or GITHUB_API_URL / GITHUB_SERVER_URL).");
+              process.exit(1);
+            }
 
             for (const repo of repos) {
               const url = `${apiBase}/repos/${repo}/actions/workflows/${wf}/dispatches`;

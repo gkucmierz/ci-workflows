@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       container_name:
-        description: 'Nazwa działającego kontenera Docker (np. fuel-index, mem-index)'
+        description: 'Nazwa działającego kontenera Docker (np. crawler-worker)'
         required: true
         type: string
       command_scheduled:
@@ -25,7 +25,7 @@ on:
 jobs:
   exec_job:
     name: Exec in ${{ inputs.container_name }}
-    runs-on: self-hosted-pl
+    runs-on: ${{ inputs.runs_on || 'self-hosted-pl' }}
     timeout-minutes: 15
     steps:
       - name: Execute command inside running container

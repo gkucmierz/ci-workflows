@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       container_name:
-        description: 'Nazwa kontenera Docker (np. science-blog)'
+        description: 'Nazwa kontenera Docker (np. my-web-app)'
         required: true
         type: string
       runs_on:
@@ -18,12 +18,32 @@ on:
         type: boolean
         default: true
       wait_timeout_sec:
-        description: 'Limit czasu oczekiwania na publikację zależności @gkucmierz/* w NPM (s)'
+        description: 'Limit czasu oczekiwania na publikację zależności wewnętrznych w NPM (s)'
         required: false
         type: number
         default: 180
       healthcheck_url:
-        description: 'Opcjonalny URL lokalnego smoke-testu HTTP po wdrożeniu (np. http://localhost:6162/)'
+        description: 'Opcjonalny URL lokalnego smoke-testu HTTP po wdrożeniu (np. http://localhost:3000/)'
+        required: false
+        type: string
+        default: ''
+      gitea_owner:
+        description: 'Właściciel lub organizacja w Gitea / GitHub (domyślnie wykrywany z kontekstu repozytorium)'
+        required: false
+        type: string
+        default: ''
+      package_scope:
+        description: 'Prefiks scope paczek wewnętrznych NPM, np. @acme/ (domyślnie wykrywany dynamicznie)'
+        required: false
+        type: string
+        default: ''
+      private_registry_url:
+        description: 'URL prywatnego rejestru NPM (domyślnie wyliczany dynamicznie z kontekstu serwera i właściciela)'
+        required: false
+        type: string
+        default: ''
+      internal_packages:
+        description: 'Opcjonalna lista dodatkowych paczek wewnętrznych (CSV)'
         required: false
         type: string
         default: ''
@@ -37,10 +57,17 @@ jobs:
       - name: Checkout repository code
         uses: actions/checkout@v4
 
-      - name: Wait for @gkucmierz/* dependencies (NPM & Gitea Packages)
+      - name: Wait for internal dependencies (NPM & Private Registry)
         env:
           WAIT_FOR_DEPS_TIMEOUT_SEC: ${{ inputs.wait_timeout_sec }}
-          GITEA_PKG_TOKEN: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || gitea.token }}
+          GITEA_PKG_TOKEN: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || github.token }}
+          GITEA_SERVER_URL: ${{ github.server_url }}
+          GITEA_API_URL: ${{ github.api_url }}
+          GITEA_REPO_FULL: ${{ github.repository }}
+          GITEA_OWNER_INPUT: ${{ inputs.gitea_owner }}
+          PACKAGE_SCOPE_INPUT: ${{ inputs.package_scope }}
+          PRIVATE_REGISTRY_INPUT: ${{ inputs.private_registry_url }}
+          INTERNAL_PACKAGES_INPUT: ${{ inputs.internal_packages }}
         run: |
           node -e '
           const fs = require("fs");
@@ -48,18 +75,97 @@ jobs:
           const { execFileSync } = require("child_process");
           const giteaToken = process.env.GITEA_PKG_TOKEN || "";
           const files = ["package.json", "ui/package.json", "server/package.json", "crawler/package.json", "client/package.json", "app/package.json", "web/package.json"].filter(f => fs.existsSync(f));
+          const npmrcFiles = [".npmrc", "ui/.npmrc", "server/.npmrc", "crawler/.npmrc", "client/.npmrc", "app/.npmrc", "web/.npmrc"].filter(f => fs.existsSync(f));
+          let npmrcScope = "";
+          let npmrcRegistry = "";
+          for (const nf of npmrcFiles) {
+            for (const line of fs.readFileSync(nf, "utf8").split("\n")) {
+              const t = line.trim();
+              if (!t || t.startsWith("#") || t.startsWith(";")) continue;
+              const sm = t.match(/^(@[^:=\s]+):registry\s*=\s*(\S+)/);
+              if (sm) {
+                if (!npmrcScope) npmrcScope = sm[1];
+                if (!npmrcRegistry && !sm[2].includes("registry.npmjs.org")) npmrcRegistry = sm[2];
+                continue;
+              }
+              const pm = t.match(/^registry\s*=\s*(\S+)/);
+              if (pm && !pm[1].includes("registry.npmjs.org") && !npmrcRegistry) npmrcRegistry = pm[1];
+            }
+          }
+          let pkgScopeOwner = "";
+          for (const f of files) {
+            try {
+              const p = JSON.parse(fs.readFileSync(f, "utf8"));
+              if (p.name && String(p.name).startsWith("@") && String(p.name).includes("/")) {
+                pkgScopeOwner = String(p.name).slice(1).split("/")[0];
+                break;
+              }
+            } catch {}
+          }
+          const safeOrigin = (u) => { try { return u ? new URL(String(u).trim()).origin : ""; } catch { return ""; } };
+          const safeHost = (u) => { try { return u ? new URL(String(u).trim()).host.toLowerCase() : ""; } catch { return ""; } };
+          const normalizeScope = (s) => {
+            const t = String(s || "").trim();
+            if (!t) return "";
+            const a = t.startsWith("@") ? t : "@" + t;
+            return a.endsWith("/") ? a : a + "/";
+          };
+          const npmrcOwnerMatch = npmrcRegistry.match(/\/api\/packages\/([^/]+)\/npm/i);
+          const npmrcOwner = npmrcOwnerMatch ? decodeURIComponent(npmrcOwnerMatch[1]) : "";
+          const repoFull = String(process.env.GITEA_REPO_FULL || process.env.GITHUB_REPOSITORY || "").trim();
+          const repoSlugOwner = repoFull.includes("/") ? repoFull.split("/")[0].trim() : "";
+          const repoOwner = String(
+            process.env.GITEA_OWNER_INPUT ||
+            process.env.GITHUB_REPOSITORY_OWNER ||
+            repoSlugOwner ||
+            npmrcOwner ||
+            pkgScopeOwner ||
+            ""
+          ).trim();
+          const scopePrefix =
+            normalizeScope(process.env.PACKAGE_SCOPE_INPUT) ||
+            normalizeScope(npmrcScope) ||
+            (repoOwner ? "@" + repoOwner + "/" : "") ||
+            (pkgScopeOwner ? "@" + pkgScopeOwner + "/" : "");
+          const serverOrigin =
+            safeOrigin(process.env.GITEA_SERVER_URL || process.env.GITHUB_SERVER_URL) ||
+            safeOrigin(process.env.PRIVATE_REGISTRY_INPUT) ||
+            safeOrigin(npmrcRegistry);
+          const apiBase = (
+            String(process.env.GITEA_API_URL || process.env.GITHUB_API_URL || "").trim() ||
+            (serverOrigin ? serverOrigin + "/api/v1" : "")
+          ).replace(/\/+$/, "");
+          const internalApiBase = serverOrigin && !serverOrigin.includes("github.com") ? "http://gitea:3000/api/v1" : "";
+          const apiBases = Array.from(new Set([internalApiBase, apiBase].filter(Boolean)));
+          const rawPrivReg =
+            String(process.env.PRIVATE_REGISTRY_INPUT || "").trim() ||
+            npmrcRegistry ||
+            (serverOrigin && repoOwner && !serverOrigin.includes("github.com")
+              ? serverOrigin + "/api/packages/" + encodeURIComponent(repoOwner) + "/npm/"
+              : "");
+          const privateRegUrl = rawPrivReg ? rawPrivReg.replace(/\/+$/, "") + "/" : "";
+          const internalBridgeRegUrl = privateRegUrl.includes("/api/packages/")
+            ? privateRegUrl.replace(/^https?:\/\/[^/]+\//, "http://gitea:3000/")
+            : "";
+          const privateHosts = new Set(
+            [safeHost(serverOrigin), safeHost(privateRegUrl), safeHost(apiBase), "gitea:3000"].filter(
+              h => h && h !== "registry.npmjs.org" && h !== "registry.yarnpkg.com" && h !== "github.com" && h !== "api.github.com"
+            )
+          );
+          const isPrivateHostUrl = (s) => {
+            const str = String(s || "");
+            if (!str || str.includes("registry.npmjs.org")) return false;
+            if (str.includes("/api/packages/") || str.includes("gitea:3000")) return true;
+            const lower = str.toLowerCase();
+            for (const h of privateHosts) {
+              if (lower.includes(h)) return true;
+            }
+            return false;
+          };
           const cmp = (a, b) => {
             const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
             for (let i = 0; i < 3; i++) if ((pa[i]||0) !== (pb[i]||0)) return (pa[i]||0) - (pb[i]||0);
             return 0;
-          };
-          const UNSCOPED_INTERNAL_PKGS = new Set(["i18n-scroll-restore", "vue-url-cleaner"]);
-          const isInternalDep = (name, verSpec) => {
-            if (!name) return false;
-            if (name.startsWith("@gkucmierz/")) return true;
-            if (UNSCOPED_INTERNAL_PKGS.has(name)) return true;
-            if (String(verSpec || "").includes("gitea.7u.pl")) return true;
-            return false;
           };
           const extractMinVer = (verSpec) => {
             const s = String(verSpec || "");
@@ -67,31 +173,74 @@ jobs:
             if (urlMatch) return urlMatch[1];
             return s.replace(/^[^\d]*/, "").split("-")[0] || "0.0.0";
           };
-          const selfNames = new Set();
-          const deps = new Map();
-          for (const f of files) {
-            const p = JSON.parse(fs.readFileSync(f, "utf8"));
-            if (p.name) selfNames.add(p.name);
-            for (const [k, v] of Object.entries({ ...(p.dependencies || {}), ...(p.devDependencies || {}) })) {
-              if (isInternalDep(k, v) && !String(v).startsWith("file:")) {
-                const ver = extractMinVer(v);
-                if (!deps.has(k) || cmp(ver, deps.get(k)) > 0) {
-                  deps.set(k, ver);
-                }
-              }
-            }
-          }
-          for (const s of selfNames) deps.delete(s);
           const buildHeaders = (url) => {
             const h = { "Cache-Control": "no-cache" };
-            if (giteaToken && (String(url).includes("gitea.7u.pl") || String(url).includes("gitea:3000"))) {
+            if (giteaToken && isPrivateHostUrl(url)) {
               h["Authorization"] = "token " + giteaToken;
             }
             return h;
           };
           const rewriteInternalGiteaUrl = (url) => {
-            if (!url) return url;
-            return String(url).replace(/^https:\/\/gitea\.7u\.pl\//, "http://gitea:3000/");
+            if (!url || !isPrivateHostUrl(url)) return url;
+            return String(url).replace(/^https?:\/\/[^/]+\//, "http://gitea:3000/");
+          };
+          const ownedPackages = new Set(
+            String(process.env.INTERNAL_PACKAGES_INPUT || "").split(",").map(s => s.trim()).filter(Boolean)
+          );
+          const checkedUnscoped = new Map();
+          const discoverOwnedPackages = async () => {
+            if (!repoOwner || apiBases.length === 0) return;
+            for (const base of apiBases) {
+              let okBase = false;
+              for (let page = 1; page <= 5; page++) {
+                try {
+                  const u = `${base}/packages/${encodeURIComponent(repoOwner)}?type=npm&limit=100&page=${page}`;
+                  const r = await fetch(u, { headers: buildHeaders(u) });
+                  if (!r.ok) break;
+                  okBase = true;
+                  const arr = await r.json();
+                  if (!Array.isArray(arr) || arr.length === 0) break;
+                  for (const p of arr) if (p && p.name) ownedPackages.add(String(p.name));
+                } catch { break; }
+              }
+              if (okBase) break;
+            }
+          };
+          const checkUnscopedOwnedRepo = async (depName) => {
+            if (!depName || depName.startsWith("@")) return false;
+            if (ownedPackages.has(depName)) return true;
+            if (checkedUnscoped.has(depName)) return checkedUnscoped.get(depName);
+            if (!repoOwner || apiBases.length === 0) {
+              checkedUnscoped.set(depName, false);
+              return false;
+            }
+            for (const base of apiBases) {
+              try {
+                const u = `${base}/repos/${encodeURIComponent(repoOwner)}/${encodeURIComponent(depName)}`;
+                const r = await fetch(u, { headers: buildHeaders(u) });
+                if (r.status === 200) {
+                  const data = await r.json();
+                  const owned = Boolean(
+                    data && data.fork === false && String(data.owner?.login || "").toLowerCase() === repoOwner.toLowerCase()
+                  );
+                  if (owned) ownedPackages.add(depName);
+                  checkedUnscoped.set(depName, owned);
+                  return owned;
+                }
+                checkedUnscoped.set(depName, false);
+                return false;
+              } catch {}
+            }
+            checkedUnscoped.set(depName, false);
+            return false;
+          };
+          const isInternalDep = async (name, verSpec) => {
+            if (!name) return false;
+            if (scopePrefix && name.startsWith(scopePrefix)) return true;
+            if (ownedPackages.has(name)) return true;
+            if (isPrivateHostUrl(verSpec)) return true;
+            if (!name.startsWith("@")) return await checkUnscopedOwnedRepo(name);
+            return false;
           };
           const queryReg = async (baseUrl, name, minVer) => {
             try {
@@ -110,13 +259,15 @@ jobs:
           };
           const autoHealDispatched = new Set();
           const triggerUpstreamSelfHeal = async (pkgName, minVer) => {
-            if (autoHealDispatched.has(pkgName) || !giteaToken) return;
+            if (autoHealDispatched.has(pkgName) || !giteaToken || !repoOwner || apiBases.length === 0) return;
             autoHealDispatched.add(pkgName);
-            const repoName = pkgName.replace(/^@gkucmierz\//, "");
-            for (const apiBase of ["http://gitea:3000/api/v1", "https://gitea.7u.pl/api/v1"]) {
+            const repoName = scopePrefix && pkgName.startsWith(scopePrefix)
+              ? pkgName.slice(scopePrefix.length)
+              : pkgName.replace(/^@[^/]+\//, "");
+            for (const base of apiBases) {
               for (const wf of ["publish.yml", "publish.yaml", "build.yml", "build.yaml", "deploy.yml", "deploy.yaml"]) {
                 try {
-                  const res = await fetch(`${apiBase}/repos/gkucmierz/${repoName}/actions/workflows/${wf}/dispatches`, {
+                  const res = await fetch(`${base}/repos/${encodeURIComponent(repoOwner)}/${encodeURIComponent(repoName)}/actions/workflows/${wf}/dispatches`, {
                     method: "POST",
                     headers: {
                       "Authorization": "token " + giteaToken,
@@ -125,7 +276,7 @@ jobs:
                     body: JSON.stringify({ ref: "main" })
                   });
                   if (res.status === 204 || res.status === 200 || res.status === 201) {
-                    console.log(`🩺 [self-heal] Auto-triggered workflow ${wf} for gkucmierz/${repoName} (waiting for ${pkgName}>=${minVer})`);
+                    console.log(`🩺 [self-heal] Auto-triggered workflow ${wf} for ${repoOwner}/${repoName} (waiting for ${pkgName}>=${minVer})`);
                     return;
                   }
                 } catch {}
@@ -133,6 +284,32 @@ jobs:
             }
           };
           (async () => {
+            const selfNames = new Set();
+            const rawAllEntries = [];
+            for (const f of files) {
+              const p = JSON.parse(fs.readFileSync(f, "utf8"));
+              if (p.name) selfNames.add(p.name);
+              for (const [k, v] of Object.entries({ ...(p.dependencies || {}), ...(p.devDependencies || {}) })) {
+                rawAllEntries.push([k, v]);
+              }
+            }
+            if (rawAllEntries.length > 0) {
+              await discoverOwnedPackages();
+              const unscopedCandidates = Array.from(new Set(rawAllEntries.map(([k]) => k).filter(k => !k.startsWith("@") && !ownedPackages.has(k))));
+              if (unscopedCandidates.length > 0) {
+                await Promise.all(unscopedCandidates.map(k => checkUnscopedOwnedRepo(k)));
+              }
+            }
+            const deps = new Map();
+            for (const [k, v] of rawAllEntries) {
+              if ((await isInternalDep(k, v)) && !String(v).startsWith("file:")) {
+                const ver = extractMinVer(v);
+                if (!deps.has(k) || cmp(ver, deps.get(k)) > 0) {
+                  deps.set(k, ver);
+                }
+              }
+            }
+            for (const s of selfNames) deps.delete(s);
             const deadline = Date.now() + (Number(process.env.WAIT_FOR_DEPS_TIMEOUT_SEC || 180) * 1000);
             const resolvedBuffers = new Map();
             const queue = Array.from(deps.entries());
@@ -142,8 +319,10 @@ jobs:
               let hit = null;
               while (true) {
                 const [internalGiteaHit, giteaHit, npmHit] = await Promise.all([
-                  queryReg("http://gitea:3000/api/packages/gkucmierz/npm/", name, minVer),
-                  queryReg("https://gitea.7u.pl/api/packages/gkucmierz/npm/", name, minVer),
+                  internalBridgeRegUrl && internalBridgeRegUrl !== privateRegUrl
+                    ? queryReg(internalBridgeRegUrl, name, minVer)
+                    : Promise.resolve(null),
+                  privateRegUrl ? queryReg(privateRegUrl, name, minVer) : Promise.resolve(null),
                   queryReg("https://registry.npmjs.org/", name, minVer)
                 ]);
                 const candidates = [
@@ -175,7 +354,7 @@ jobs:
                 await new Promise(r => setTimeout(r, 5000));
               }
               let tRes = await fetch(hit.tarball, { headers: buildHeaders(hit.tarball) }).catch(() => null);
-              if ((!tRes || !tRes.ok) && String(hit.tarball).includes("gitea.7u.pl")) {
+              if ((!tRes || !tRes.ok) && isPrivateHostUrl(hit.tarball) && !String(hit.tarball).startsWith("http://gitea:3000/")) {
                 const altUrl = rewriteInternalGiteaUrl(hit.tarball);
                 tRes = await fetch(altUrl, { headers: buildHeaders(altUrl) }).catch(() => null);
               }
@@ -192,12 +371,12 @@ jobs:
                 const innerPkg = JSON.parse(innerPkgRaw);
                 let innerModified = false;
                 for (const [tk, tv] of Object.entries(innerPkg.dependencies || {})) {
-                  if (isInternalDep(tk, tv) && !selfNames.has(tk)) {
+                  if ((await isInternalDep(tk, tv)) && !selfNames.has(tk)) {
                     const tVer = extractMinVer(tv);
                     if (!resolvedBuffers.has(tk) || cmp(tVer, resolvedBuffers.get(tk).version) > 0) {
                       queue.push([tk, tVer]);
                     }
-                    if (String(tv).includes("gitea.7u.pl")) {
+                    if (isPrivateHostUrl(tv)) {
                       innerPkg.dependencies[tk] = "^" + (tVer === "0.0.0" ? "1.0.0" : tVer);
                       innerModified = true;
                     }
@@ -246,14 +425,14 @@ jobs:
                 if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
                 const npmrcPath = path.join(pkgDir, ".npmrc");
                 if (fs.existsSync(npmrcPath)) {
-                  const cleaned = fs.readFileSync(npmrcPath, "utf8").split("\n").filter(l => !l.includes("gitea.7u.pl")).join("\n");
+                  const cleaned = fs.readFileSync(npmrcPath, "utf8").split("\n").filter(l => !isPrivateHostUrl(l)).join("\n");
                   fs.writeFileSync(npmrcPath, cleaned);
                 }
-                console.log("📦 [wait-for-deps] Zapisano lokalne tarballe @gkucmierz/* w " + vendorDir + " i zaktualizowano " + f);
+                console.log("📦 [wait-for-deps] Zapisano lokalne tarballe zależności wewnętrznych w " + vendorDir + " i zaktualizowano " + f);
               }
               if (anyChanged) {
                 if (fs.existsSync(".npmrc")) {
-                  const cleaned = fs.readFileSync(".npmrc", "utf8").split("\n").filter(l => !l.includes("gitea.7u.pl")).join("\n");
+                  const cleaned = fs.readFileSync(".npmrc", "utf8").split("\n").filter(l => !isPrivateHostUrl(l)).join("\n");
                   fs.writeFileSync(".npmrc", cleaned);
                 }
                 const subDirsRe = /^(ui|server|crawler|client|app|web)\/package/;
@@ -368,14 +547,20 @@ jobs:
       - name: Sync Gitea Repository Website & Description Metadata
         if: always()
         env:
-          REPO_TOKEN: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || gitea.token }}
+          REPO_TOKEN: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || github.token }}
           HC_URL: ${{ inputs.healthcheck_url }}
+          GITEA_SERVER_URL: ${{ github.server_url }}
+          GITEA_API_URL: ${{ github.api_url }}
+          GITEA_REPO_FULL: ${{ github.repository }}
         run: |
           node -e '
           const fs = require("fs");
           const token = process.env.REPO_TOKEN || "";
-          const repoSlug = process.env.GITHUB_REPOSITORY || "";
-          if (!token || !repoSlug) process.exit(0);
+          const repoSlug = String(process.env.GITEA_REPO_FULL || process.env.GITHUB_REPOSITORY || "").trim();
+          let srv = "";
+          try { srv = new URL(String(process.env.GITEA_SERVER_URL || process.env.GITHUB_SERVER_URL || "").trim()).origin; } catch {}
+          const apiBase = (String(process.env.GITEA_API_URL || process.env.GITHUB_API_URL || "").trim() || (srv ? srv + "/api/v1" : "")).replace(/\/+$/, "");
+          if (!token || !repoSlug || !apiBase || apiBase.includes("api.github.com")) process.exit(0);
           let pkg = {};
           try { pkg = JSON.parse(fs.readFileSync("package.json", "utf8")); } catch {}
           const hcUrl = process.env.HC_URL || "";
@@ -385,7 +570,7 @@ jobs:
           const body = {};
           if (website) body.website = website;
           if (description) body.description = description;
-          fetch("https://gitea.7u.pl/api/v1/repos/" + repoSlug, {
+          fetch(apiBase + "/repos/" + repoSlug, {
             method: "PATCH",
             headers: {
               "Authorization": "token " + token,

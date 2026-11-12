@@ -8,7 +8,7 @@ on:
 
 jobs:
   release_and_deploy:
-    name: Sanitize, Dual-Publish NPM & Zero-Downtime Deploy (ci.7u.pl)
+    name: Sanitize, Dual-Publish NPM & Zero-Downtime Deploy
     runs-on: self-hosted-pl
     timeout-minutes: 15
     steps:
@@ -29,7 +29,7 @@ jobs:
           npm_token: ${{ secrets.NPM_AUTH_TOKEN || secrets.NPM_TOKEN }}
           private_token: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Zero-Downtime SPA Build & Nginx Hot-Swap (ci.7u.pl)
+      - name: Zero-Downtime SPA Build & Nginx Hot-Swap
         uses: ./zero-downtime-swap
         with:
           container_name: ci-workflows
@@ -63,12 +63,16 @@ jobs:
         if: always()
         env:
           MIRROR_TOKEN: ${{ secrets.GITHUB_MIRROR_TOKEN }}
+          REPO_SLUG: ${{ github.repository }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           if [ -z "$MIRROR_TOKEN" ]; then
             echo "ℹ️ GITHUB_MIRROR_TOKEN not set — skipping GitHub mirror sync."
             exit 0
           fi
-          git push --force "https://gkucmierz:${MIRROR_TOKEN}@github.com/gkucmierz/ci-workflows.git" HEAD:refs/heads/main || true
+          SLUG="${REPO_SLUG:-${GITHUB_REPOSITORY:-gkucmierz/ci-workflows}}"
+          OWNER="${REPO_OWNER:-${GITHUB_REPOSITORY_OWNER:-${SLUG%%/*}}}"
+          git push --force "https://${OWNER}:${MIRROR_TOKEN}@github.com/${SLUG}.git" HEAD:refs/heads/main || true
 
   purge_de_runner_cache:
     name: Purge Stale ci-workflows Act Cache on DE Runner
