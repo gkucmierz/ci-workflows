@@ -1,5 +1,5 @@
 name: 'Wait for Scoped NPM Dependencies (Dependency Readiness Gate)'
-description: 'Asynchroniczny poczekiwacz sprawdzający przed docker compose build, czy wszystkie wymagane wersje bibliotek @gkucmierz/* są już opublikowane i ściągalne z rejestru NPM.'
+description: 'Asynchroniczny poczekiwacz sprawdzający przed docker compose build, czy wszystkie wymagane wersje bibliotek wewnętrznych (@scope/*) są już opublikowane i ściągalne z rejestru NPM.'
 inputs:
   working_directory:
     description: 'Katalog projektu z plikiem package.json'
@@ -14,19 +14,21 @@ inputs:
     required: false
     default: '5'
   scope:
-    description: 'Prefiks przestrzeni nazw paczek (domyślnie @gkucmierz/)'
+    description: 'Prefiks przestrzeni nazw paczek (np. @acme/; domyślnie wykrywany dynamicznie z .npmrc, właściciela repozytorium lub package.json)'
     required: false
-    default: '@gkucmierz/'
+    default: ''
 
 runs:
   using: 'composite'
   steps:
-    - name: Verify and wait for @gkucmierz/* packages in NPM registry
+    - name: Verify and wait for scoped internal packages in NPM registry
       shell: bash
       env:
         WAIT_FOR_DEPS_TIMEOUT_SEC: ${{ inputs.timeout_sec }}
         WAIT_FOR_DEPS_INTERVAL_SEC: ${{ inputs.interval_sec }}
         WAIT_FOR_DEPS_SCOPE: ${{ inputs.scope }}
+        GITEA_SERVER_URL: ${{ github.server_url }}
+        GITEA_REPO_FULL: ${{ github.repository }}
       run: |
         [ -f "${{ github.action_path }}/../bin/wait-for-deps.mjs" ] || node "${{ github.action_path }}/../src/buildBin.mjs"
         node "${{ github.action_path }}/../bin/wait-for-deps.mjs" "${{ inputs.working_directory }}"

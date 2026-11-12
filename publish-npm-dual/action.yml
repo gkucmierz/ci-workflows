@@ -18,9 +18,13 @@ inputs:
     required: false
     default: 'true'
   private_registry_url:
-    description: 'URL prywatnego rejestru NPM'
+    description: 'URL prywatnego rejestru NPM (domyślnie wyliczany dynamicznie z kontekstu serwera i właściciela)'
     required: false
-    default: 'https://gitea.7u.pl/api/packages/gkucmierz/npm/'
+    default: ''
+  gitea_owner:
+    description: 'Właściciel lub organizacja w Gitea / GitHub (domyślnie wykrywany z kontekstu repozytorium)'
+    required: false
+    default: ''
   npm_token:
     description: 'Token autoryzacyjny do registry.npmjs.org'
     required: false
@@ -59,9 +63,37 @@ runs:
       env:
         NODE_AUTH_TOKEN: ${{ inputs.private_token }}
         PRIVATE_REGISTRY: ${{ inputs.private_registry_url }}
+        GITEA_SERVER_URL: ${{ github.server_url }}
+        GITEA_API_URL: ${{ github.api_url }}
+        GITEA_REPO_FULL: ${{ github.repository }}
+        GITEA_OWNER_INPUT: ${{ inputs.gitea_owner }}
       run: |
         if [ -z "$NODE_AUTH_TOKEN" ]; then
           echo "⚠️ private_token is empty, skipping private registry publish."
+          exit 0
+        fi
+        REG_CLEAN=$(node -e '
+          const fs = require("fs");
+          const explicit = String(process.env.PRIVATE_REGISTRY || "").trim();
+          if (explicit) { console.log(explicit.replace(/\/+$/, "") + "/"); process.exit(0); }
+          let npmrcReg = "";
+          if (fs.existsSync(".npmrc")) {
+            for (const l of fs.readFileSync(".npmrc", "utf8").split("\n")) {
+              const m = l.trim().match(/^(?:@[^:=\s]+:)?registry\s*=\s*(\S+)/);
+              if (m && !m[1].includes("registry.npmjs.org")) { npmrcReg = m[1]; break; }
+            }
+          }
+          if (npmrcReg) { console.log(npmrcReg.replace(/\/+$/, "") + "/"); process.exit(0); }
+          let srv = "";
+          try { srv = new URL(String(process.env.GITEA_SERVER_URL || process.env.GITHUB_SERVER_URL || "").trim()).origin; } catch {}
+          const repoFull = String(process.env.GITEA_REPO_FULL || process.env.GITHUB_REPOSITORY || "").trim();
+          const owner = String(process.env.GITEA_OWNER_INPUT || process.env.GITHUB_REPOSITORY_OWNER || (repoFull.includes("/") ? repoFull.split("/")[0] : "")).trim();
+          if (srv && owner && !srv.includes("github.com")) {
+            console.log(`${srv}/api/packages/${encodeURIComponent(owner)}/npm/`);
+          }
+        ')
+        if [ -z "$REG_CLEAN" ]; then
+          echo "⚠️ private_registry_url could not be resolved, skipping private registry publish."
           exit 0
         fi
         TMP_NPMRC=$(mktemp)
@@ -71,7 +103,6 @@ runs:
         NAME=$(node -p "require('./package.json').name")
         VER=$(node -p "require('./package.json').version")
         SCOPE=$(node -p "const n=require('./package.json').name; n.startsWith('@') ? n.split('/')[0] : ''")
-        REG_CLEAN=$(echo "$PRIVATE_REGISTRY" | sed -E 's|/*$|/|')
         REG_HOST=$(echo "$REG_CLEAN" | sed -E 's|^https?://||')
         if [ -n "$SCOPE" ]; then
           printf "%s:registry=%s\n" "$SCOPE" "$REG_CLEAN" >> "$TMP_NPMRC"
@@ -86,12 +117,17 @@ runs:
         # Automatically link package to its Gitea repository so package visibility strictly inherits repo Private/Public status
         node -e '
         (async () => {
-          const repoFull = process.env.GITHUB_REPOSITORY || "";
+          const repoFull = String(process.env.GITEA_REPO_FULL || process.env.GITHUB_REPOSITORY || "").trim();
           const token = process.env.NODE_AUTH_TOKEN || "";
           const pkgName = process.argv[1];
           if (!repoFull.includes("/") || !token || !pkgName) return;
+          let srv = "";
+          try { srv = new URL(String(process.env.GITEA_SERVER_URL || process.env.GITHUB_SERVER_URL || "").trim()).origin; } catch {}
+          const apiBase = (String(process.env.GITEA_API_URL || process.env.GITHUB_API_URL || "").trim() || (srv ? srv + "/api/v1" : "")).replace(/\/+$/, "");
+          if (!apiBase || apiBase.includes("api.github.com")) return;
           const [owner, repoName] = repoFull.split("/");
-          const url = `https://gitea.7u.pl/api/v1/packages/${encodeURIComponent(owner)}/npm/${encodeURIComponent(pkgName)}/-/link/${encodeURIComponent(repoName)}`;
+          const ownerResolved = String(process.env.GITEA_OWNER_INPUT || owner).trim();
+          const url = `${apiBase}/packages/${encodeURIComponent(ownerResolved)}/npm/${encodeURIComponent(pkgName)}/-/link/${encodeURIComponent(repoName)}`;
           try {
             const res = await fetch(url, { method: "POST", headers: { Authorization: `token ${token}` } });
             console.log(`🔗 [Gitea Package Link] Linked ${pkgName} -> ${repoFull} (HTTP ${res.status})`);
@@ -105,6 +141,9 @@ runs:
       working-directory: ${{ inputs.working_directory }}
       env:
         NODE_AUTH_TOKEN: ${{ inputs.npm_token }}
+        GITEA_SERVER_URL: ${{ github.server_url }}
+        GITEA_API_URL: ${{ github.api_url }}
+        GITEA_REPO_FULL: ${{ github.repository }}
       run: |
         # Dual-SSoT Privacy Gate: block public publish if package.json is UNLICENSED/private OR if Gitea repo is Private
         ALLOW_PUBLIC=$(node -e '
@@ -116,15 +155,18 @@ runs:
           console.log("BLOCK");
           process.exit(0);
         }
-        const repoFull = process.env.GITHUB_REPOSITORY || "";
-        if (!repoFull.includes("/")) {
+        const repoFull = String(process.env.GITEA_REPO_FULL || process.env.GITHUB_REPOSITORY || "").trim();
+        let srv = "";
+        try { srv = new URL(String(process.env.GITEA_SERVER_URL || process.env.GITHUB_SERVER_URL || "").trim()).origin; } catch {}
+        const apiBase = (String(process.env.GITEA_API_URL || process.env.GITHUB_API_URL || "").trim() || (srv ? srv + "/api/v1" : "")).replace(/\/+$/, "");
+        if (!repoFull.includes("/") || !apiBase) {
           console.log("ALLOW");
           process.exit(0);
         }
-        fetch(`https://gitea.7u.pl/api/v1/repos/${repoFull}`)
+        fetch(`${apiBase}/repos/${repoFull}`)
           .then(r => {
             if (r.status !== 200) {
-              console.error(`🔒 [Privacy Gate] Repository ${repoFull} is PRIVATE on Gitea (unauthenticated HTTP ${r.status}) — strictly blocking public npmjs.org publish.`);
+              console.error(`🔒 [Privacy Gate] Repository ${repoFull} is PRIVATE (unauthenticated HTTP ${r.status}) — strictly blocking public npmjs.org publish.`);
               console.log("BLOCK");
             } else {
               console.log("ALLOW");
