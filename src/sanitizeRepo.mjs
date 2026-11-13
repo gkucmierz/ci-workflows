@@ -28,7 +28,7 @@ const FORBIDDEN_RULES = [
   {
     id: 'SECRET_LOG_SLICING',
     name: 'Partial Secret Slicing / Mask-Bypass in Workflow or Script',
-    re: /(?:TOKEN|SECRET|PASSWORD|API_KEY|PAT)\s*(?:\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/i
+    re: /(?:(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY|PAT)|(?:auth|api|npm|gitea|github|gitlab|access|refresh|bearer|secret|private|client|webhook|admin|user|jwt|session)[A-Za-z0-9_]*(?:Token|Secret|Password|Key|Pat))\b\s*(?:['"`]?\s*\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/
   }
 ]
 
