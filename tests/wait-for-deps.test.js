@@ -48,10 +48,21 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
   it('scans non-git directories (e.g. inside node:22-alpine Docker build context) without throwing git ENOENT', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-nogit-'))
     try {
-      fs.writeFileSync(path.join(tmp, 'clean.js'), 'export const x = 42;\n')
+      fs.writeFileSync(
+        path.join(tmp, 'clean.js'),
+        'export const parse = (token, pat) => [token.slice(0, 3), pat.split("/")];\n'
+      )
       const res = scanRepositoryForLeaks(tmp)
       assert.equal(res.clean, true)
       assert.equal(res.scannedCount, 1)
+
+      fs.writeFileSync(
+        path.join(tmp, 'leak.js'),
+        'console.log(process.env.NPM_TOKEN.slice(0, 4), authToken.slice(0, 6));\n'
+      )
+      const leakRes = scanRepositoryForLeaks(tmp)
+      assert.equal(leakRes.clean, false)
+      assert.ok(leakRes.violations.some((v) => v.ruleId === 'SECRET_LOG_SLICING'))
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true })
     }
