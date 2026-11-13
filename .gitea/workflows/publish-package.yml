@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: true
+      build_script:
+        description: 'Nazwa skryptu budowania w package.json (domyślnie build)'
+        required: false
+        type: string
+        default: 'build'
       publish_npmjs:
         description: 'Publikuj w publicznym rejestrze https://registry.npmjs.org'
         required: false
@@ -95,7 +100,7 @@ jobs:
             { name: "Local macOS User Path", re: new RegExp("\\x2fUsers\\x2f[a-zA-Z0-9][a-zA-Z0-9._-]*\\x2f") },
             { name: "Private Key Block", re: new RegExp("-----BEGIN (RSA |OPENSSH |EC |PGP )?PRIVATE KEY-----") },
             { name: "Sliced Token Prefix", re: /[\x27\x22\x60](?:ghp_|github_pat_|npm_|glpat-|sk-proj-|AIza)[\x27\x22\x60]\s*\+/ },
-            { name: "Partial Secret Slicing", re: /(?:TOKEN|SECRET|PASSWORD|API_KEY|PAT)\s*(?:\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/i }
+            { name: "Partial Secret Slicing", re: /(?:(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY|PAT)|(?:auth|api|npm|gitea|github|gitlab|access|refresh|bearer|secret|private|client|webhook|admin|user|jwt|session)[A-Za-z0-9_]*(?:Token|Secret|Password|Key|Pat))\b\s*(?:[\x27\x22\x60]?\s*\]\s*)?\.\s*(?:slice|substring|substr|split)\s*\(/ }
           ];
           const hits = [];
           for (const f of files) {
@@ -136,15 +141,29 @@ jobs:
           const { execSync, execFileSync } = require("child_process");
           const rawPkg = fs.readFileSync("package.json", "utf8");
           const rawNpmrc = fs.existsSync(".npmrc") ? fs.readFileSync(".npmrc", "utf8") : null;
+          const subPkgFiles = ["ui/package.json", "server/package.json", "crawler/package.json", "client/package.json", "app/package.json", "web/package.json"].filter(f => fs.existsSync(f));
+          const rawSubPkgs = new Map(subPkgFiles.map(f => [f, fs.readFileSync(f, "utf8")]));
+          const subNpmrcFiles = ["ui/.npmrc", "server/.npmrc", "crawler/.npmrc", "client/.npmrc", "app/.npmrc", "web/.npmrc"].filter(f => fs.existsSync(f));
+          const rawSubNpmrcs = new Map(subNpmrcFiles.map(f => [f, fs.readFileSync(f, "utf8")]));
           const pkg = JSON.parse(rawPkg);
+          const selfNames = new Set([pkg.name].filter(Boolean));
           const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+          for (const [f, raw] of rawSubPkgs.entries()) {
+            try {
+              const sp = JSON.parse(raw);
+              if (sp.name) selfNames.add(sp.name);
+              for (const [dk, dv] of Object.entries({ ...(sp.dependencies || {}), ...(sp.devDependencies || {}) })) {
+                if (!allDeps[dk]) allDeps[dk] = dv;
+              }
+            } catch {}
+          }
           const hasDeps = Object.keys(allDeps).length > 0;
           const giteaToken = process.env.GITEA_PKG_TOKEN || "";
 
           let npmrcScope = "";
           let npmrcRegistry = "";
-          if (rawNpmrc) {
-            for (const line of rawNpmrc.split("\n")) {
+          for (const candidateNpmrc of [rawNpmrc, ...rawSubNpmrcs.values()].filter(Boolean)) {
+            for (const line of candidateNpmrc.split("\n")) {
               const t = line.trim();
               if (!t || t.startsWith("#") || t.startsWith(";")) continue;
               const sm = t.match(/^(@[^:=\s]+):registry\s*=\s*(\S+)/);
@@ -318,6 +337,15 @@ jobs:
           (async () => {
             let pkgModified = false;
             const vendorDir = path.resolve("vendor-tarballs");
+            const subVendorDirs = new Set();
+            const restoreAllManifests = () => {
+              fs.writeFileSync("package.json", rawPkg);
+              for (const [f, raw] of rawSubPkgs.entries()) fs.writeFileSync(f, raw);
+              if (rawNpmrc !== null) fs.writeFileSync(".npmrc", rawNpmrc);
+              for (const [nf, raw] of rawSubNpmrcs.entries()) fs.writeFileSync(nf, raw);
+              fs.rmSync(vendorDir, { recursive: true, force: true });
+              for (const svd of subVendorDirs) fs.rmSync(svd, { recursive: true, force: true });
+            };
             try {
               if (hasDeps) {
                 await discoverOwnedPackages();
@@ -327,7 +355,7 @@ jobs:
                 }
                 const queue = [];
                 for (const [k, v] of Object.entries(allDeps)) {
-                  if ((await isInternalDep(k, v)) && !String(v).startsWith("file:")) {
+                  if (!selfNames.has(k) && (await isInternalDep(k, v)) && !String(v).startsWith("file:")) {
                     queue.push([k, extractMinVer(v)]);
                   }
                 }
@@ -369,7 +397,7 @@ jobs:
                     const innerPkg = JSON.parse(innerRaw);
                     let innerModified = false;
                     for (const [tk, tv] of Object.entries(innerPkg.dependencies || {})) {
-                      if ((await isInternalDep(tk, tv)) && tk !== pkg.name) {
+                      if ((await isInternalDep(tk, tv)) && !selfNames.has(tk)) {
                         const tVer = extractMinVer(tv);
                         if (!resolved.has(tk) || cmp(tVer, resolved.get(tk).version) > 0) queue.push([tk, tVer]);
                         if (isPrivateHostUrl(tv)) {
@@ -384,28 +412,55 @@ jobs:
                       execFileSync("tar", ["-xzf", tgzPath, "-C", repackDir]);
                       fs.writeFileSync(path.join(repackDir, "package", "package.json"), JSON.stringify(innerPkg, null, 2) + "\n");
                       execFileSync("tar", ["-czf", tgzPath, "-C", repackDir, "package"]);
+                      buf = fs.readFileSync(tgzPath);
                       fs.rmSync(repackDir, { recursive: true, force: true });
                     }
                   } catch {}
-                  resolved.set(k, { version: hit.version, localRef: "file:./vendor-tarballs/" + safeFile });
+                  resolved.set(k, { version: hit.version, safeFile, buf, localRef: "file:./vendor-tarballs/" + safeFile });
                 }
                 if (resolved.size > 0) {
                   pkg.dependencies = pkg.dependencies || {};
                   pkg.overrides = pkg.overrides || {};
                   for (const [depName, info] of resolved.entries()) {
-                    if (pkg.dependencies[depName] || (!pkg.devDependencies?.[depName])) pkg.dependencies[depName] = info.localRef;
+                    if (pkg.dependencies[depName] || (!pkg.devDependencies?.[depName] && subPkgFiles.length === 0)) pkg.dependencies[depName] = info.localRef;
                     if (pkg.devDependencies && pkg.devDependencies[depName]) pkg.devDependencies[depName] = info.localRef;
                     pkg.overrides[depName] = info.localRef;
+                  }
+                  const nonWorkspaceSubDirs = [];
+                  const rootWorkspaces = Array.isArray(pkg.workspaces) ? pkg.workspaces : [];
+                  for (const [subFile, rawSub] of rawSubPkgs.entries()) {
+                    const subDir = path.dirname(subFile);
+                    const subPkg = JSON.parse(rawSub);
+                    const subHasResolved = Object.keys({ ...(subPkg.dependencies || {}), ...(subPkg.devDependencies || {}) }).some(k => resolved.has(k));
+                    if (!subHasResolved) continue;
+                    const svd = path.resolve(subDir, "vendor-tarballs");
+                    fs.mkdirSync(svd, { recursive: true });
+                    subVendorDirs.add(svd);
+                    subPkg.dependencies = subPkg.dependencies || {};
+                    subPkg.overrides = subPkg.overrides || {};
+                    for (const [depName, info] of resolved.entries()) {
+                      fs.writeFileSync(path.join(svd, info.safeFile), info.buf);
+                      if (subPkg.dependencies[depName] || !subPkg.devDependencies?.[depName]) subPkg.dependencies[depName] = info.localRef;
+                      if (subPkg.devDependencies && subPkg.devDependencies[depName]) subPkg.devDependencies[depName] = info.localRef;
+                      subPkg.overrides[depName] = info.localRef;
+                    }
+                    fs.writeFileSync(subFile, JSON.stringify(subPkg, null, 2) + "\n");
+                    if (!rootWorkspaces.includes(subDir)) nonWorkspaceSubDirs.push(subDir);
                   }
                   pkgModified = true;
                   fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
                   if (rawNpmrc !== null) {
                     fs.writeFileSync(".npmrc", rawNpmrc.split("\n").filter(l => !isPrivateHostUrl(l)).join("\n"));
                   }
+                  for (const [nf, rawNf] of rawSubNpmrcs.entries()) {
+                    fs.writeFileSync(nf, rawNf.split("\n").filter(l => !isPrivateHostUrl(l)).join("\n"));
+                  }
                   execSync("npm install --no-package-lock", { stdio: "inherit" });
+                  for (const subDir of nonWorkspaceSubDirs) {
+                    execSync("npm --prefix " + subDir + " install --no-package-lock", { stdio: "inherit" });
+                  }
                   fs.writeFileSync("package.json", rawPkg);
-                  if (rawNpmrc !== null) fs.writeFileSync(".npmrc", rawNpmrc);
-                  fs.rmSync(vendorDir, { recursive: true, force: true });
+                  restoreAllManifests();
                   pkgModified = false;
                 } else {
                   execSync(fs.existsSync("package-lock.json") ? "npm ci" : "npm install", { stdio: "inherit" });
@@ -421,9 +476,7 @@ jobs:
               }
             } finally {
               if (pkgModified) {
-                fs.writeFileSync("package.json", rawPkg);
-                if (rawNpmrc !== null) fs.writeFileSync(".npmrc", rawNpmrc);
-                fs.rmSync(vendorDir, { recursive: true, force: true });
+                restoreAllManifests();
               }
             }
           })();
