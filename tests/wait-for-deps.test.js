@@ -325,6 +325,14 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     // Verify nginx -s reload closes stdin & stdout/stderr pipes to prevent 3h act_runner hangs
     assert.match(deployYml, /nginx -s reload <\/dev\/null >\/dev\/null 2>&1/)
 
+    // Verify zero-downtime-deploy.yml and zero-downtime-swap/action.yml do not inject an empty dependencies: {} object when staging dev-only vendor tarballs
+    const swapActionYml = fs.readFileSync(
+      path.join(rootDir, 'zero-downtime-swap/action.yml'),
+      'utf8'
+    )
+    assert.match(deployYml, /if \(!hadDeps && Object\.keys\(p\.dependencies\)\.length === 0\)/)
+    assert.match(swapActionYml, /if \(!hadDeps && Object\.keys\(p\.dependencies\)\.length === 0\)/)
+
     // Verify publish-package.yml restores raw package.json & .npmrc immediately after npm install (before npm test & npm run build)
     const installIdx = publishYml.indexOf('execSync("npm install --no-package-lock"')
     const preTestRestoreIdx = publishYml.indexOf('fs.writeFileSync("package.json", rawPkg)', installIdx)
