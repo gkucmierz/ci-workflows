@@ -406,6 +406,7 @@ jobs:
                 const vendorDir = path.join(pkgDir, "vendor-tarballs");
                 fs.mkdirSync(vendorDir, { recursive: true });
                 vendorDirs.add(pkgDir.replace(/\/+$/, "") || ".");
+                const hadDeps = Boolean(p.dependencies);
                 p.dependencies = p.dependencies || {};
                 p.overrides = p.overrides || {};
                 for (const [depName, info] of resolvedBuffers.entries()) {
@@ -418,6 +419,9 @@ jobs:
                     p.devDependencies[depName] = localRef;
                   }
                   p.overrides[depName] = localRef;
+                }
+                if (!hadDeps && Object.keys(p.dependencies).length === 0) {
+                  delete p.dependencies;
                 }
                 anyChanged = true;
                 fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
