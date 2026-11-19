@@ -8,7 +8,8 @@ export {
   extractScopedDependencies,
   checkPackageAvailability,
   waitForAllDependencies,
-  patchDockerfileVendorTarballs
+  patchDockerfileVendorTarballs,
+  patchDockerComposeBuildNetwork
 } from './waitForDeps.mjs'
 
 export { scanRepositoryForLeaks } from './sanitizeRepo.mjs'
