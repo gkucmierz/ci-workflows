@@ -13,7 +13,8 @@ import {
   extractScopedDependencies,
   checkPackageAvailability,
   waitForAllDependencies,
-  patchDockerfileVendorTarballs
+  patchDockerfileVendorTarballs,
+  patchDockerComposeBuildNetwork
 } from '../src/waitForDeps.mjs'
 import { scanRepositoryForLeaks } from '../src/sanitizeRepo.mjs'
 import { buildCliBinaries } from '../src/buildBin.mjs'
@@ -29,6 +30,7 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     assert.equal(typeof publicEntry.checkPackageAvailability, 'function')
     assert.equal(typeof publicEntry.waitForAllDependencies, 'function')
     assert.equal(typeof publicEntry.patchDockerfileVendorTarballs, 'function')
+    assert.equal(typeof publicEntry.patchDockerComposeBuildNetwork, 'function')
     assert.equal(typeof publicEntry.scanRepositoryForLeaks, 'function')
   })
 
@@ -464,6 +466,82 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
     assert.ok(
       patchedFullstack.includes('RUN npm --prefix server install --omit=dev'),
       'Rewrites npm --prefix <dir> ci to install'
+    )
+  })
+
+  it('patches docker-compose build network: host in strict O(N) time without ReDoS backtracking', () => {
+    const hardenedNoDockerfile = [
+      'name: my-service',
+      '',
+      'services:',
+      '  my-service:',
+      '    build: .',
+      '    image: my-service:latest',
+      '    container_name: my-service',
+      '    restart: unless-stopped',
+      '    read_only: true',
+      '    tmpfs:',
+      '      - /tmp:rw,noexec,nosuid,size=16m',
+      '    cap_drop:',
+      '      - ALL',
+      '    security_opt:',
+      '      - no-new-privileges:true',
+      '    sysctls:',
+      '      - net.ipv4.ip_unprivileged_port_start=80',
+      '    expose:',
+      '      - "80"',
+      '    volumes:',
+      '      - app-data:/data',
+      '    environment:',
+      ...Array.from({ length: 40 }, (_, i) => `      - ENV_VAR_${i}=value_${i}`),
+      '    networks:',
+      '      public_net:',
+      '        aliases:',
+      '          - my-service'
+    ].join('\n')
+
+    const t0 = performance.now()
+    const patchedScalar = patchDockerComposeBuildNetwork(hardenedNoDockerfile)
+    const elapsedMs = performance.now() - t0
+    assert.ok(elapsedMs < 50, `Expected linear O(N) patch < 50ms, took ${elapsedMs.toFixed(2)}ms`)
+    assert.ok(
+      patchedScalar.includes('    build:\n      context: .\n      network: host\n    image: my-service:latest')
+    )
+    // Idempotent on second pass (must not duplicate network: host or backtrack)
+    assert.equal(patchDockerComposeBuildNetwork(patchedScalar), patchedScalar)
+
+    const multiLineCompose = [
+      'services:',
+      '  api:',
+      '    build:',
+      '      context: ./api',
+      '      dockerfile: Dockerfile.prod',
+      '      args:',
+      '        NODE_ENV: production',
+      '    image: api:latest'
+    ].join('\n')
+    const patchedBlock = patchDockerComposeBuildNetwork(multiLineCompose)
+    assert.ok(
+      patchedBlock.includes('        NODE_ENV: production\n      network: host\n    image: api:latest')
+    )
+    assert.equal(patchDockerComposeBuildNetwork(patchedBlock), patchedBlock)
+
+    // Verify the live inline script inside zero-downtime-deploy.yml has zero catastrophic regexes
+    const zddPath = path.resolve(
+      path.dirname(new URL(import.meta.url).pathname),
+      '..',
+      '.gitea',
+      'workflows',
+      'zero-downtime-deploy.yml'
+    )
+    const zdd = fs.readFileSync(zddPath, 'utf8')
+    assert.ok(
+      !zdd.includes('(?:\\s+[^\\n]+\\n)*?'),
+      'zero-downtime-deploy.yml must never reintroduce nested-quantifier ReDoS regex'
+    )
+    assert.ok(
+      zdd.includes('BUILDKIT_PROGRESS=plain docker compose build'),
+      'zero-downtime-deploy.yml must stream unbuffered BuildKit progress logs'
     )
   })
 })
