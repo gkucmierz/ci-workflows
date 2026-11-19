@@ -392,7 +392,7 @@ runs:
         })();
         '
 
-        docker compose build
+        BUILDKIT_PROGRESS=plain docker compose build
 
         if [ "$HOT_SWAP" = "true" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
           IMG_NAME=$(docker compose config --images 2>/dev/null | head -n 1)
