@@ -524,3 +524,67 @@ export const patchDockerfileVendorTarballs = (
 
   return patchedLines.join('\n')
 }
+
+/**
+ * Linear-time O(N) YAML line scanner that injects `network: host` into every `build:`
+ * block of a `docker-compose.yml` file without any backtracking regexes (ReDoS-proof).
+ * Supports both shorthand `build: .` / `build: ./sub` and multi-line `build:` mappings
+ * (with or without `dockerfile:` or nested `args:`).
+ */
+export const patchDockerComposeBuildNetwork = (yamlContent) => {
+  const raw = String(yamlContent ?? '')
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
+  const lines = raw.split(/\r?\n/)
+  const out = []
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const scalarMatch = line.match(/^([ \t]*)build:[ \t]+([^#\s][^\r\n]*?)[ \t]*(?:#.*)?$/)
+    if (scalarMatch) {
+      const [, indent, ctx] = scalarMatch
+      out.push(`${indent}build:`, `${indent}  context: ${ctx}`, `${indent}  network: host`)
+      continue
+    }
+
+    const blockMatch = line.match(/^([ \t]*)build:[ \t]*(?:#.*)?$/)
+    if (blockMatch) {
+      const baseIndent = blockMatch[1]
+      const baseLen = baseIndent.length
+      let childIndent = null
+      let hasNetwork = false
+      let lastChildIdx = -1
+      let j = i + 1
+
+      while (j < lines.length) {
+        const cur = lines[j]
+        const trimmed = cur.trim()
+        if (!trimmed || trimmed.startsWith('#')) {
+          j++
+          continue
+        }
+        const curIndent = cur.match(/^[ \t]*/)[0]
+        if (curIndent.length <= baseLen) break
+        if (childIndent === null) childIndent = curIndent
+        if (curIndent.length === childIndent.length && /^network:[ \t]*/.test(trimmed)) {
+          hasNetwork = true
+        }
+        lastChildIdx = j
+        j++
+      }
+
+      if (!hasNetwork && lastChildIdx >= 0) {
+        for (let k = i; k <= lastChildIdx; k++) out.push(lines[k])
+        out.push(`${childIndent}network: host`)
+        for (let k = lastChildIdx + 1; k < j; k++) out.push(lines[k])
+      } else {
+        for (let k = i; k < j; k++) out.push(lines[k])
+      }
+      i = j - 1
+      continue
+    }
+
+    out.push(line)
+  }
+
+  return out.join(eol)
+}
