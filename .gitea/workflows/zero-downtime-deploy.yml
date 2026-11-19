@@ -482,17 +482,47 @@ jobs:
           node -e '
             const fs = require("fs");
             if (fs.existsSync("docker-compose.yml")) {
-              let dc = fs.readFileSync("docker-compose.yml", "utf8");
-              dc = dc.replace(/^(\s*)build:\s*\.\s*$/gm, "$1build:\n$1  context: .\n$1  network: host");
-              dc = dc.replace(/^(\s*build:\s*\n(?:\s+[^\n]+\n)*?)(\s*dockerfile:\s*[^\n]+)$/gm, (m, p1, p2) => {
-                if (m.includes("network:")) return m;
-                const indent = (p2.match(/^\s*/) || ["      "])[0];
-                return p1 + p2 + "\n" + indent + "network: host";
-              });
-              fs.writeFileSync("docker-compose.yml", dc);
+              const raw = fs.readFileSync("docker-compose.yml", "utf8");
+              const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+              const lines = raw.split(/\r?\n/);
+              const out = [];
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                const sm = line.match(/^([ \t]*)build:[ \t]+([^#\s][^\r\n]*?)[ \t]*(?:#.*)?$/);
+                if (sm) {
+                  out.push(sm[1] + "build:", sm[1] + "  context: " + sm[2], sm[1] + "  network: host");
+                  continue;
+                }
+                const bm = line.match(/^([ \t]*)build:[ \t]*(?:#.*)?$/);
+                if (bm) {
+                  const baseLen = bm[1].length;
+                  let childIndent = null, hasNetwork = false, lastChild = -1, j = i + 1;
+                  while (j < lines.length) {
+                    const cur = lines[j], trimmed = cur.trim();
+                    if (!trimmed || trimmed.startsWith("#")) { j++; continue; }
+                    const curIndent = cur.match(/^[ \t]*/)[0];
+                    if (curIndent.length <= baseLen) break;
+                    if (childIndent === null) childIndent = curIndent;
+                    if (curIndent.length === childIndent.length && /^network:[ \t]*/.test(trimmed)) hasNetwork = true;
+                    lastChild = j;
+                    j++;
+                  }
+                  if (!hasNetwork && lastChild >= 0) {
+                    for (let k = i; k <= lastChild; k++) out.push(lines[k]);
+                    out.push(childIndent + "network: host");
+                    for (let k = lastChild + 1; k < j; k++) out.push(lines[k]);
+                  } else {
+                    for (let k = i; k < j; k++) out.push(lines[k]);
+                  }
+                  i = j - 1;
+                  continue;
+                }
+                out.push(line);
+              }
+              fs.writeFileSync("docker-compose.yml", out.join(eol));
             }
           '
-          docker compose build
+          BUILDKIT_PROGRESS=plain docker compose build
           if [ "$HOT_SWAP" = "true" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
             IMG_NAME=$(docker compose config --images 2>/dev/null | head -n 1)
             IMG_ID=$(docker image inspect -f '{{.Id}}' "$IMG_NAME" 2>/dev/null | head -n 1)
