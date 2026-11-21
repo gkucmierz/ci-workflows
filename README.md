@@ -18,7 +18,9 @@ Centralne repozytorium sprawdzonych, sparametryzowanych wzorców CI/CD dla self-
 
 ## Przykłady użycia (Zero-Hallucination Templates)
 
-### 1. Aplikacja Webowa / Blog (`zero-downtime-deploy.yml`)
+### 1. Aplikacja Webowa / Blog — Zalecany wzorzec ze statycznym `runs-on` (`zero-downtime-swap`)
+> W środowiskach wielorunnerowych Gitea Actions statyczne `runs-on:` w workflow wywołującym gwarantuje deterministyczny wybór węzła, a dwuwarstwowy healthcheck weryfikuje **zarówno** uruchomiony kontener, jak i zewnętrzny `healthcheck_url` (wykrywa `502`/`525`/`5xx` i niezgodności proxy).
+
 ```yaml
 name: Build and Deploy
 on:
@@ -28,13 +30,19 @@ on:
 
 jobs:
   deploy:
-    uses: gkucmierz/ci-workflows/.gitea/workflows/zero-downtime-deploy.yml@main
-    with:
-      container_name: my-web-app
-      runs_on: self-hosted-pl
-      hot_swap_static: true
-      healthcheck_url: http://localhost:3000/
+    runs-on: self-hosted-pl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gkucmierz/ci-workflows/wait-for-deps@main
+      - uses: gkucmierz/ci-workflows/zero-downtime-swap@main
+        with:
+          container_name: my-web-app
+          hot_swap_static: 'true'
+          healthcheck_url: https://app.example.com/
+          require_external_healthcheck: 'true'
 ```
+
+*(Dostępny jest również wariant `workflow_call`: `uses: gkucmierz/ci-workflows/.gitea/workflows/zero-downtime-deploy.yml@main` z identyczną dwuwarstwową weryfikacją `healthcheck_url`.)*
 
 ### 2. Biblioteka NPM — Dual Publish (`publish-package.yml`)
 ```yaml
