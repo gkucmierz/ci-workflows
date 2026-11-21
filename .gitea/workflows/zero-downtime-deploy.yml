@@ -23,10 +23,25 @@ on:
         type: number
         default: 180
       healthcheck_url:
-        description: 'Opcjonalny URL lokalnego smoke-testu HTTP po wdrożeniu (np. http://localhost:3000/)'
+        description: 'Opcjonalny publiczny lub lokalny URL smoke-testu HTTP po wdrożeniu (np. https://app.example.com/ lub http://localhost:3000/)'
         required: false
         type: string
         default: ''
+      require_external_healthcheck:
+        description: 'Czy niepowodzenie zewnętrznego healthcheck_url (np. 502/525/5xx) przerywa pipeline błędem (domyślnie true)'
+        required: false
+        type: boolean
+        default: true
+      healthcheck_retries:
+        description: 'Maksymalna liczba prób odpytania zewnętrznego healthcheck_url (domyślnie 8)'
+        required: false
+        type: number
+        default: 8
+      expected_status:
+        description: 'Akceptowane kody HTTP zewnętrznego healthchecku (CSV, domyślnie 200,204,301,302,307,308)'
+        required: false
+        type: string
+        default: '200,204,301,302,307,308'
       gitea_owner:
         description: 'Właściciel lub organizacja w Gitea / GitHub (domyślnie wykrywany z kontekstu repozytorium)'
         required: false
@@ -522,6 +537,7 @@ jobs:
               fs.writeFileSync("docker-compose.yml", out.join(eol));
             }
           '
+          echo "🏃 Active runner: ${RUNNER_NAME:-unknown} (container: $CONTAINER, requested runs_on: ${{ inputs.runs_on || 'self-hosted-pl' }})"
           BUILDKIT_PROGRESS=plain docker compose build
           if [ "$HOT_SWAP" = "true" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
             IMG_NAME=$(docker compose config --images 2>/dev/null | head -n 1)
@@ -545,38 +561,126 @@ jobs:
             docker exec "$npm_cid" nginx -s reload </dev/null >/dev/null 2>&1 || true
           done
 
-      - name: Post-Deploy Auto Smoke Test (Internal Container Probe & Homepage)
+      - name: Post-Deploy Dual-Layer Smoke Test (Internal Container + External URL)
+        env:
+          HC_CONTAINER: ${{ inputs.container_name }}
+          HC_URL: ${{ inputs.healthcheck_url }}
+          HC_REQUIRE_EXTERNAL: ${{ inputs.require_external_healthcheck }}
+          HC_RETRIES: ${{ inputs.healthcheck_retries }}
+          HC_EXPECTED_STATUS: ${{ inputs.expected_status }}
         run: |
-          URL="${{ inputs.healthcheck_url }}"
-          if [ -z "$URL" ] && [ -f package.json ]; then
-            URL=$(node -e 'try { const p = JSON.parse(require("fs").readFileSync("package.json","utf8")); if (p.homepage && p.homepage.startsWith("http")) console.log(p.homepage); } catch {}' 2>/dev/null || echo "")
-          fi
-          CONTAINER="${{ inputs.container_name }}"
-          echo "🔍 Smoke-testing container: $CONTAINER ${URL:+(url: $URL)} ..."
-          for i in 1 2 3 4 5; do
-            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
-              if docker exec "$CONTAINER" wget -q -O /dev/null http://127.0.0.1:80/ 2>/dev/null; then
-                echo "✅ Smoke test passed via internal container probe ($CONTAINER -> 127.0.0.1:80 HTTP 200)"
-                exit 0
-              fi
-            fi
-            if [ -n "$URL" ]; then
-              STATUS=$(node -e "fetch(process.argv[1]).then(r => console.log(r.status)).catch(() => console.log('000'))" "$URL" 2>/dev/null || echo "000")
-              if [ "$STATUS" = "200" ] || [ "$STATUS" = "301" ] || [ "$STATUS" = "302" ]; then
-                echo "✅ Smoke test passed ($URL -> HTTP $STATUS)"
-                exit 0
-              fi
-            fi
-            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ] && [ -z "$URL" ]; then
-              echo "✅ Container $CONTAINER is running"
-              exit 0
-            fi
-            echo "⏳ Attempt $i/5 waiting for $CONTAINER readiness, retrying in 2s..."
-            sleep 2
-          done
-          echo "❌ Smoke test failed for $CONTAINER"
-          docker logs "$CONTAINER" --tail 40 || true
-          exit 1
+          node -e '
+          const fs = require("fs");
+          const { execFileSync } = require("child_process");
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const container = String(process.env.HC_CONTAINER || "").trim();
+          const runnerName = String(process.env.RUNNER_NAME || "").trim();
+          const requireExt = String(process.env.HC_REQUIRE_EXTERNAL ?? "true").trim().toLowerCase() !== "false";
+          const retries = Math.max(1, Math.min(30, Number(process.env.HC_RETRIES || 8)));
+          const allowed = new Set(
+            String(process.env.HC_EXPECTED_STATUS || "200,204,301,302,307,308")
+              .split(/[,\s]+/)
+              .map(Number)
+              .filter((n) => Number.isInteger(n) && n >= 100 && n <= 599)
+          );
+          let url = String(process.env.HC_URL || "").trim();
+          if (!url && fs.existsSync("package.json")) {
+            try {
+              const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              if (p.homepage && /^https?:\/\//i.test(String(p.homepage))) url = String(p.homepage).trim();
+            } catch {}
+          }
+          const isRunning = () => {
+            try {
+              return execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", container], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === "true";
+            } catch { return false; }
+          };
+          const probeInternal = () => {
+            try {
+              execFileSync("docker", ["exec", container, "sh", "-c", "wget -q -O /dev/null http://127.0.0.1:80/ 2>/dev/null || curl -fsS -o /dev/null http://127.0.0.1:80/ 2>/dev/null"], { stdio: "ignore", timeout: 5000 });
+              return true;
+            } catch { return false; }
+          };
+          const printLogs = () => {
+            try {
+              const out = execFileSync("docker", ["logs", container, "--tail", "40"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+              if (out.trim()) console.error("--- docker logs " + container + " ---\n" + out.trim());
+            } catch {}
+          };
+          const diagnose = (status, err) => {
+            if (status === 502 || status === 503 || status === 504) {
+              return "HTTP " + status + " on " + url + ": upstream gateway unreachable — verify reverse proxy hostname/port, shared Docker bridge network, and that the job ran on the intended target runner (static runs-on label).";
+            }
+            if (status === 525 || status === 526) {
+              return "HTTP " + status + " on " + url + ": TLS/SSL handshake or certificate validation failed at reverse proxy.";
+            }
+            if (status >= 520 && status <= 524) {
+              return "HTTP " + status + " on " + url + ": edge proxy could not reach origin host — verify DNS target and firewall.";
+            }
+            if (status > 0) return "HTTP " + status + " on " + url + ": unexpected non-healthy HTTP status.";
+            return "Network/TLS error probing " + url + ": " + (err || "connection failed");
+          };
+          (async () => {
+            console.log("🔍 Dual-layer smoke test for \"" + container + "\"" + (runnerName ? " on runner \"" + runnerName + "\"" : "") + (url ? " (external: " + url + ", requireExternal=" + requireExt + ")" : " (no external URL)") + "...");
+            let running = false;
+            let internalOk = false;
+            const p1Max = Math.min(retries, 5);
+            for (let i = 1; i <= p1Max; i++) {
+              running = isRunning();
+              if (running) {
+                internalOk = probeInternal();
+                if (internalOk || url) break;
+              }
+              if (i < p1Max) {
+                console.log("⏳ Waiting for container \"" + container + "\" readiness (" + i + "/" + p1Max + ")...");
+                await sleep(2000);
+              }
+            }
+            if (!running) {
+              console.error("❌ Container \"" + container + "\" is not running after deploy.");
+              printLogs();
+              process.exit(1);
+            }
+            console.log(internalOk ? "✅ Phase 1 passed: container \"" + container + "\" running & 127.0.0.1:80 HTTP 200." : "ℹ️ Phase 1: container \"" + container + "\" is running.");
+            if (!url) {
+              console.log("✅ Smoke test passed (no external healthcheck_url configured).");
+              process.exit(0);
+            }
+            let lastStatus = 0;
+            let lastErr = "";
+            for (let i = 1; i <= retries; i++) {
+              lastStatus = 0;
+              lastErr = "";
+              try {
+                const res = await fetch(url, {
+                  method: "GET",
+                  redirect: "manual",
+                  headers: { "Cache-Control": "no-cache, no-store", Pragma: "no-cache", "User-Agent": "ci-workflows-healthcheck/1.0" },
+                  signal: AbortSignal.timeout(10000)
+                });
+                lastStatus = Number(res.status) || 0;
+                if (allowed.has(lastStatus)) {
+                  console.log("✅ Phase 2 passed: external " + url + " -> HTTP " + lastStatus + " (attempt " + i + "/" + retries + ").");
+                  process.exit(0);
+                }
+              } catch (e) {
+                lastErr = e?.cause?.code || e?.cause?.message || e?.message || String(e);
+              }
+              if (i < retries) {
+                console.log("⏳ External probe " + i + "/" + retries + " for " + url + " returned " + (lastStatus > 0 ? "HTTP " + lastStatus : lastErr) + "; retrying in 2s...");
+                await sleep(2000);
+              }
+            }
+            const msg = diagnose(lastStatus, lastErr);
+            if (!requireExt) {
+              console.warn("⚠️ External healthcheck warning (non-blocking): " + msg);
+              process.exit(0);
+            }
+            console.error("❌ Dual-layer smoke test FAILED — container \"" + container + "\" is running locally, but external check failed: " + msg);
+            printLogs();
+            process.exit(1);
+          })();
+          '
 
       - name: Sync Gitea Repository Website & Description Metadata
         if: always()

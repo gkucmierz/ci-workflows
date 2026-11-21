@@ -1,17 +1,19 @@
 {
   "name": "@gkucmierz/ci-workflows",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Deterministic Reusable Gitea/GitHub Actions, Zero-Downtime Docker Swap, Dependency Readiness Gate (wait-for-deps) & Anti-Token-Slicing OPSEC Scanner",
   "type": "module",
   "main": "./src/index.mjs",
   "exports": {
     ".": "./src/index.mjs",
     "./wait-for-deps": "./src/waitForDeps.mjs",
-    "./sanitize": "./src/sanitizeRepo.mjs"
+    "./sanitize": "./src/sanitizeRepo.mjs",
+    "./healthcheck": "./src/healthcheck.mjs"
   },
   "bin": {
     "wait-for-deps": "./bin/wait-for-deps.mjs",
-    "oss-sanitize-check": "./bin/sanitize-check.mjs"
+    "oss-sanitize-check": "./bin/sanitize-check.mjs",
+    "post-deploy-healthcheck": "./bin/post-deploy-healthcheck.mjs"
   },
   "files": [
     "bin/",
