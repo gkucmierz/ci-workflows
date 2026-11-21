@@ -92,6 +92,12 @@ export const classifyHealthcheckFailure = ({ status = 0, error = '', url = '' } 
     return `HTTP ${code} on ${target}: unexpected non-healthy HTTP response.`
   }
   const errDetail = String(error || 'connection failed').trim()
+  if (/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?/i.test(target) && /ECONNREFUSED/i.test(errDetail)) {
+    return (
+      `Network error probing ${target}: ${errDetail} — if the container uses expose-only networking ` +
+      '(no host ports: binding in docker-compose.yml), replace healthcheck_url with the public https:// domain or omit it.'
+    )
+  }
   return `Network/TLS error probing ${target}: ${errDetail}`
 }
 
