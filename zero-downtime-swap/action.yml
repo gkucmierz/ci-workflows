@@ -9,9 +9,33 @@ inputs:
     required: false
     default: 'true'
   healthcheck_url:
-    description: 'Opcjonalny URL lokalnego smoke-testu HTTP po wdrożeniu (np. http://localhost:30172/)'
+    description: 'Opcjonalny publiczny lub lokalny URL smoke-testu HTTP po wdrożeniu (np. https://app.example.com/ lub http://localhost:3000/)'
     required: false
     default: ''
+  require_external_healthcheck:
+    description: 'Czy niepowodzenie zewnętrznego healthcheck_url (np. 502/525/5xx) ma przerywać pipeline błędem (domyślnie true)'
+    required: false
+    default: 'true'
+  healthcheck_retries:
+    description: 'Maksymalna liczba prób odpytania zewnętrznego healthcheck_url (domyślnie 8)'
+    required: false
+    default: '8'
+  healthcheck_interval_sec:
+    description: 'Odstęp w sekundach między próbami healthcheck_url (domyślnie 2)'
+    required: false
+    default: '2'
+  healthcheck_timeout_sec:
+    description: 'Timeout pojedynczego zapytania HTTP w sekundach (domyślnie 10)'
+    required: false
+    default: '10'
+  expected_status:
+    description: 'Lista akceptowanych kodów HTTP (CSV, domyślnie 200,204,301,302,307,308)'
+    required: false
+    default: '200,204,301,302,307,308'
+  internal_probe_port:
+    description: 'Wewnętrzny port HTTP kontenera dla fazy 1 sondy kontenera (domyślnie 80)'
+    required: false
+    default: '80'
   private_registry_token:
     description: 'Opcjonalny token odczytu prywatnych paczek z Gitea Packages podczas docker compose build'
     required: false
@@ -392,6 +416,7 @@ runs:
         })();
         '
 
+        echo "🏃 Active runner: ${RUNNER_NAME:-unknown} (container: $CONTAINER, hot_swap_static: $HOT_SWAP)"
         BUILDKIT_PROGRESS=plain docker compose build
 
         if [ "$HOT_SWAP" = "true" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
@@ -418,34 +443,17 @@ runs:
           docker exec "$npm_cid" nginx -s reload </dev/null >/dev/null 2>&1 || true
         done
 
-        URL="${{ inputs.healthcheck_url }}"
-        if [ -z "$URL" ] && [ -f package.json ]; then
-          URL=$(node -e 'try { const p = JSON.parse(require("fs").readFileSync("package.json","utf8")); if (p.homepage && p.homepage.startsWith("http")) console.log(p.homepage); } catch {}' 2>/dev/null || echo "")
-        fi
-        if [ -n "$URL" ] || [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
-          echo "🔍 Smoke-testing ${URL:-internal probe} (container: $CONTAINER) ..."
-          OK=0
-          for i in 1 2 3 4 5; do
-            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
-              if docker exec "$CONTAINER" wget -q -O /dev/null http://127.0.0.1:80/ 2>/dev/null; then
-                echo "✅ Smoke test passed via internal container probe ($CONTAINER -> 127.0.0.1:80 HTTP 200)"
-                OK=1
-                break
-              fi
-            fi
-            if [ -n "$URL" ]; then
-              STATUS=$(node -e "fetch(process.argv[1]).then(r => console.log(r.status)).catch(() => console.log('000'))" "$URL" 2>/dev/null || echo "000")
-              if [ "$STATUS" = "200" ] || [ "$STATUS" = "301" ] || [ "$STATUS" = "302" ]; then
-                echo "✅ Smoke test passed ($URL -> HTTP $STATUS)"
-                OK=1
-                break
-              fi
-            fi
-            sleep 2
-          done
-          if [ "$OK" != "1" ]; then
-            echo "❌ Smoke test failed for ${URL:-$CONTAINER}"
-            docker logs "$CONTAINER" --tail 40 || true
-            exit 1
-          fi
-        fi
+    - name: Post-Deploy Dual-Layer Healthcheck (Internal Container + External URL)
+      shell: bash
+      env:
+        HC_CONTAINER: ${{ inputs.container_name }}
+        HC_URL: ${{ inputs.healthcheck_url }}
+        HC_REQUIRE_EXTERNAL: ${{ inputs.require_external_healthcheck }}
+        HC_RETRIES: ${{ inputs.healthcheck_retries }}
+        HC_INTERVAL_SEC: ${{ inputs.healthcheck_interval_sec }}
+        HC_TIMEOUT_SEC: ${{ inputs.healthcheck_timeout_sec }}
+        HC_EXPECTED_STATUS: ${{ inputs.expected_status }}
+        HC_INTERNAL_PORT: ${{ inputs.internal_probe_port }}
+      run: |
+        [ -f "${{ github.action_path }}/../bin/post-deploy-healthcheck.mjs" ] || node "${{ github.action_path }}/../src/buildBin.mjs"
+        node "${{ github.action_path }}/../bin/post-deploy-healthcheck.mjs"
