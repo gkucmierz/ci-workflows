@@ -34,7 +34,7 @@ jobs:
         with:
           container_name: ci-workflows
           hot_swap_static: 'true'
-          healthcheck_url: 'http://localhost:30172/'
+          healthcheck_url: ${{ vars.HEALTHCHECK_URL || '' }}
 
       - name: Refresh act_runner cache for ci-workflows across all runner containers
         if: always()
