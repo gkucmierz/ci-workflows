@@ -97,6 +97,10 @@ describe('ci-workflows — Dual-Layer Post-Deploy Healthcheck (Internal + Extern
       classifyHealthcheckFailure({ status: 0, error: 'ECONNREFUSED', url: 'https://app.example.com/' }),
       /Network\/TLS error.*ECONNREFUSED/i
     )
+    assert.match(
+      classifyHealthcheckFailure({ status: 0, error: 'ECONNREFUSED', url: 'http://localhost:30172/' }),
+      /expose-only networking.*docker-compose\.yml/i
+    )
   })
 
   it('retries transient 502 during proxy reload and passes once origin returns HTTP 200', async () => {

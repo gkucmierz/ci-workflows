@@ -360,11 +360,13 @@ describe('ci-workflows — Dependency Readiness Gate (wait-for-deps)', () => {
       'zero-downtime-swap/action.yml',
       'oss-sanitize-gate/action.yml',
       'src/waitForDeps.mjs',
+      'src/healthcheck.mjs',
       'src/buildBin.mjs',
       'src/sanitizeRepo.mjs',
       'src/index.mjs',
       'bin/wait-for-deps.mjs',
       'bin/sanitize-check.mjs',
+      'bin/post-deploy-healthcheck.mjs',
       'ui/App.vue',
       'README.md'
     ]
