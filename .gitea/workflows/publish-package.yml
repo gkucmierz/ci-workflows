@@ -69,7 +69,7 @@ on:
 jobs:
   publish:
     name: Test, Verify & Publish Package
-    runs-on: ${{ inputs.runs_on || 'self-hosted-pl' }}
+    runs-on: self-hosted-pl
     timeout-minutes: 10
     steps:
       - name: Checkout repository code

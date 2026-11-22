@@ -66,7 +66,7 @@ on:
 jobs:
   deploy:
     name: Deploy (${{ inputs.container_name }})
-    runs-on: ${{ inputs.runs_on || 'self-hosted-pl' }}
+    runs-on: self-hosted-pl
     timeout-minutes: 15
     steps:
       - name: Checkout repository code
@@ -537,7 +537,12 @@ jobs:
               fs.writeFileSync("docker-compose.yml", out.join(eol));
             }
           '
-          echo "🏃 Active runner: ${RUNNER_NAME:-unknown} (container: $CONTAINER, requested runs_on: ${{ inputs.runs_on || 'self-hosted-pl' }})"
+          REQUESTED_RUNNER="${{ inputs.runs_on || 'self-hosted-pl' }}"
+          echo "🏃 Active runner: ${RUNNER_NAME:-unknown} (container: $CONTAINER, pinned: self-hosted-pl, requested runs_on: $REQUESTED_RUNNER)"
+          if [ -n "$REQUESTED_RUNNER" ] && [ "$REQUESTED_RUNNER" != "self-hosted-pl" ] && [ "$REQUESTED_RUNNER" != "self-hosted" ]; then
+            echo "❌ Reusable zero-downtime-deploy.yml is statically pinned to 'self-hosted-pl' (Gitea workflow_call drops dynamic runs-on expressions). For '$REQUESTED_RUNNER', invoke composite actions wait-for-deps@main + zero-downtime-swap@main directly under a static 'runs-on: $REQUESTED_RUNNER' job."
+            exit 1
+          fi
           BUILDKIT_PROGRESS=plain docker compose build
           if [ "$HOT_SWAP" = "true" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
             IMG_NAME=$(docker compose config --images 2>/dev/null | head -n 1)
