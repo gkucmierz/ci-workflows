@@ -241,4 +241,23 @@ describe('ci-workflows — Dual-Layer Post-Deploy Healthcheck (Internal + Extern
       'zero-downtime-deploy.yml must not exit 0 on internal 200 before verifying external healthcheck_url'
     )
   })
+
+  it('forbids dynamic runs-on: ${{ inputs.* }} expressions in all reusable workflows (prevents Gitea empty-label runner drift)', () => {
+    const wfDir = path.join(ROOT, '.gitea', 'workflows')
+    const files = fs.readdirSync(wfDir).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+    assert.ok(files.length >= 5, 'Expected reusable workflow YAML files in .gitea/workflows')
+
+    for (const file of files) {
+      const content = fs.readFileSync(path.join(wfDir, file), 'utf8')
+      assert.doesNotMatch(
+        content,
+        /^\s*runs-on:\s*\$\{\{\s*inputs\./m,
+        `${file} must use a static runs-on label instead of dynamic inputs.* (Gitea workflow_call drops dynamic runs-on to empty labels)`
+      )
+    }
+
+    const deployYml = fs.readFileSync(path.join(wfDir, 'zero-downtime-deploy.yml'), 'utf8')
+    assert.match(deployYml, /^\s*runs-on:\s*self-hosted-pl\s*$/m)
+    assert.match(deployYml, /REQUESTED_RUNNER=/)
+  })
 })
