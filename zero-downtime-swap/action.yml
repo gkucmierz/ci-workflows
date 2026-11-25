@@ -56,6 +56,10 @@ inputs:
     description: 'Opcjonalna lista dodatkowych paczek wewnętrznych (CSV)'
     required: false
     default: ''
+  expected_runner_node:
+    description: 'Opcjonalny węzeł docelowy (pl lub de) dla strażnika fail-fast RUNNER_NAME'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -416,7 +420,24 @@ runs:
         })();
         '
 
-        echo "🏃 Active runner: ${RUNNER_NAME:-unknown} (container: $CONTAINER, hot_swap_static: $HOT_SWAP)"
+        ACTIVE_RUNNER="${RUNNER_NAME:-unknown}"
+        EXPECTED_NODE="${{ inputs.expected_runner_node }}"
+        echo "🏃 Active runner: $ACTIVE_RUNNER (container: $CONTAINER, hot_swap_static: $HOT_SWAP, expected_node: ${EXPECTED_NODE:-any})"
+        if [ "$EXPECTED_NODE" = "pl" ]; then
+          case "$ACTIVE_RUNNER" in
+            de-server-runner*|*self-hosted-de*)
+              echo "❌ [RUNNER-NODE-GUARD] Refusing to deploy PL container '$CONTAINER' on DE runner '$ACTIVE_RUNNER'!"
+              exit 1
+              ;;
+          esac
+        elif [ "$EXPECTED_NODE" = "de" ]; then
+          case "$ACTIVE_RUNNER" in
+            pl-server-runner*|*self-hosted-pl*)
+              echo "❌ [RUNNER-NODE-GUARD] Refusing to deploy DE container '$CONTAINER' on PL runner '$ACTIVE_RUNNER'!"
+              exit 1
+              ;;
+          esac
+        fi
         BUILDKIT_PROGRESS=plain docker compose build
 
         if [ "$HOT_SWAP" = "true" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; then
