@@ -259,5 +259,10 @@ describe('ci-workflows — Dual-Layer Post-Deploy Healthcheck (Internal + Extern
     const deployYml = fs.readFileSync(path.join(wfDir, 'zero-downtime-deploy.yml'), 'utf8')
     assert.match(deployYml, /^\s*runs-on:\s*self-hosted-pl\s*$/m)
     assert.match(deployYml, /REQUESTED_RUNNER=/)
+    assert.match(deployYml, /\[RUNNER-NODE-GUARD\]/)
+
+    const swapAction = fs.readFileSync(path.join(ROOT, 'zero-downtime-swap', 'action.yml'), 'utf8')
+    assert.match(swapAction, /expected_runner_node:/)
+    assert.match(swapAction, /\[RUNNER-NODE-GUARD\]/)
   })
 })
