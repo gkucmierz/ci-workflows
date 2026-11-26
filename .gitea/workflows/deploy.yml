@@ -20,13 +20,12 @@ jobs:
         with:
           run_tests: 'true'
 
-      - name: Dual-Publish Package (Gitea Packages + registry.npmjs.org)
+      - name: Publish Package (Gitea Packages Only — Private Repo)
         uses: ./publish-npm-dual
         with:
           run_build: 'false'
-          publish_npmjs: 'true'
+          publish_npmjs: 'false'
           publish_private: 'true'
-          npm_token: ${{ secrets.NPM_AUTH_TOKEN || secrets.NPM_TOKEN }}
           private_token: ${{ secrets.LOCAL_PACKAGE_REGISTRY || secrets.GITEA_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Zero-Downtime SPA Build & Nginx Hot-Swap
@@ -58,21 +57,6 @@ jobs:
               done
             ' 2>/dev/null || true
           done
-
-      - name: Self-Healing Mirror Sync to GitHub (if GITHUB_MIRROR_TOKEN configured)
-        if: always()
-        env:
-          MIRROR_TOKEN: ${{ secrets.GITHUB_MIRROR_TOKEN }}
-          REPO_SLUG: ${{ github.repository }}
-          REPO_OWNER: ${{ github.repository_owner }}
-        run: |
-          if [ -z "$MIRROR_TOKEN" ]; then
-            echo "ℹ️ GITHUB_MIRROR_TOKEN not set — skipping GitHub mirror sync."
-            exit 0
-          fi
-          SLUG="${REPO_SLUG:-${GITHUB_REPOSITORY:-gkucmierz/ci-workflows}}"
-          OWNER="${REPO_OWNER:-${GITHUB_REPOSITORY_OWNER:-${SLUG%%/*}}}"
-          git push --force "https://${OWNER}:${MIRROR_TOKEN}@github.com/${SLUG}.git" HEAD:refs/heads/main || true
 
   purge_de_runner_cache:
     name: Purge Stale ci-workflows Act Cache on DE Runner

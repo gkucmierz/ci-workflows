@@ -1,6 +1,7 @@
 {
   "name": "@gkucmierz/ci-workflows",
-  "version": "1.0.11",
+  "version": "1.0.12",
+  "private": true,
   "description": "Deterministic Reusable Gitea/GitHub Actions, Zero-Downtime Docker Swap, Dependency Readiness Gate (wait-for-deps) & Anti-Token-Slicing OPSEC Scanner",
   "type": "module",
   "main": "./src/index.mjs",
@@ -29,9 +30,6 @@
     ".gitea/workflows/trigger-downstream.yml",
     "README.md"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "dev": "vite --port 30172 --host",
     "build:bin": "node ./src/buildBin.mjs",
@@ -60,5 +58,5 @@
     "secret-scanner"
   ],
   "author": "Grzegorz Kućmierz",
-  "license": "MIT"
+  "license": "UNLICENSED"
 }
