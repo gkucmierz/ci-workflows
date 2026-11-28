@@ -11,6 +11,8 @@ import {
   parseBooleanFlag,
   resolveHealthcheckUrl,
   classifyHealthcheckFailure,
+  extractStaticAssetFingerprints,
+  evaluateStaticAssetParity,
   probeExternalHealthcheck,
   evaluatePostDeployHealth
 } from '../src/healthcheck.mjs'
@@ -264,5 +266,81 @@ describe('ci-workflows — Dual-Layer Post-Deploy Healthcheck (Internal + Extern
     const swapAction = fs.readFileSync(path.join(ROOT, 'zero-downtime-swap', 'action.yml'), 'utf8')
     assert.match(swapAction, /expected_runner_node:/)
     assert.match(swapAction, /\[RUNNER-NODE-GUARD\]/)
+  })
+
+  it('CRITICAL: static bundle parity check catches silent wrong-server deploys serving stale HTTP 200 HTML', async () => {
+    const localHtml =
+      '<!DOCTYPE html><html><head>' +
+      '<script type="module" crossorigin src="/assets/index-NewHash99.js"></script>' +
+      '<link rel="stylesheet" crossorigin href="/assets/index-CssHash22.css">' +
+      '</head><body></body></html>'
+    const staleProdHtml =
+      '<!DOCTYPE html><html><head>' +
+      '<script type="module" crossorigin src="/assets/index-OldHash11.js"></script>' +
+      '<link rel="stylesheet" crossorigin href="/assets/index-CssHash22.css">' +
+      '</head><body></body></html>'
+
+    assert.deepEqual(extractStaticAssetFingerprints(localHtml), [
+      '/assets/index-CssHash22.css',
+      '/assets/index-NewHash99.js'
+    ])
+
+    const mismatch = evaluateStaticAssetParity({
+      localHtml,
+      externalHtml: staleProdHtml,
+      url: 'https://app.example.com/',
+      dockerHost: 'node-b'
+    })
+    assert.equal(mismatch.ok, false)
+    assert.deepEqual(mismatch.missing, ['/assets/index-NewHash99.js'])
+    assert.match(mismatch.reason, /Static bundle parity mismatch.*node-b.*index-NewHash99\.js.*index-OldHash11\.js/)
+
+    // Non-HTML /health JSON/text endpoint must skip parity check gracefully
+    const nonHtmlHealth = evaluateStaticAssetParity({
+      localHtml,
+      externalHtml: '{"status":"ok"}',
+      url: 'https://app.example.com/health'
+    })
+    assert.equal(nonHtmlHealth.ok, true)
+    assert.equal(nonHtmlHealth.skipped, true)
+
+    // Probe must FAIL when external returns HTTP 200 with stale bundle hash
+    const failedProbe = await probeExternalHealthcheck({
+      url: 'https://app.example.com/',
+      retries: 2,
+      intervalMs: 0,
+      expectedLocalHtml: localHtml,
+      dockerHost: 'node-b',
+      fetchImpl: async () => ({
+        status: 200,
+        headers: { get: () => '' },
+        text: async () => staleProdHtml
+      }),
+      sleepImpl: async () => {},
+      logger: { log: () => {} }
+    })
+    assert.equal(failedProbe.ok, false)
+    assert.equal(failedProbe.status, 200)
+    assert.equal(failedProbe.parityMismatch, true)
+    assert.match(failedProbe.diagnosis, /Static bundle parity mismatch/)
+
+    // Probe passes once live endpoint serves matching bundle hash
+    let calls = 0
+    const recoveredProbe = await probeExternalHealthcheck({
+      url: 'https://app.example.com/',
+      retries: 3,
+      intervalMs: 0,
+      expectedLocalHtml: localHtml,
+      fetchImpl: async () => ({
+        status: 200,
+        headers: { get: () => '' },
+        text: async () => (++calls === 1 ? staleProdHtml : localHtml)
+      }),
+      sleepImpl: async () => {},
+      logger: { log: () => {} }
+    })
+    assert.equal(recoveredProbe.ok, true)
+    assert.equal(recoveredProbe.attempts, 2)
+    assert.equal(recoveredProbe.parityChecked, true)
   })
 })
