@@ -54,26 +54,54 @@ const printContainerLogs = (containerName) => {
   }
 }
 
+const readDockerHostName = () => {
+  try {
+    return execFileSync('docker', ['info', '--format', '{{.Name}}'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 4000
+    }).trim()
+  } catch {
+    return ''
+  }
+}
+
+const readContainerIndexHtml = (containerName) => {
+  try {
+    return execFileSync('docker', ['exec', containerName, 'cat', '/usr/share/nginx/html/index.html'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000
+    })
+  } catch {
+    return ''
+  }
+}
+
 const main = async () => {
   const containerName = String(process.env.HC_CONTAINER || process.argv[2] || '').trim()
   const inputUrl = String(process.env.HC_URL || process.argv[3] || '').trim()
   const requireExternal = parseBooleanFlag(process.env.HC_REQUIRE_EXTERNAL, true)
+  const verifyStaticParity = parseBooleanFlag(process.env.HC_VERIFY_STATIC_PARITY, true)
   const retries = Math.max(1, Number(process.env.HC_RETRIES || DEFAULT_HEALTHCHECK_RETRIES))
   const intervalMs = Math.max(0, Number(process.env.HC_INTERVAL_SEC || DEFAULT_HEALTHCHECK_INTERVAL_MS / 1000) * 1000)
   const timeoutMs = Math.max(1000, Number(process.env.HC_TIMEOUT_SEC || DEFAULT_HEALTHCHECK_TIMEOUT_MS / 1000) * 1000)
   const internalPort = Number(process.env.HC_INTERNAL_PORT || 80)
   const expectedStatuses = parseExpectedStatuses(process.env.HC_EXPECTED_STATUS || DEFAULT_HEALTHY_STATUSES)
   const runnerName = String(process.env.RUNNER_NAME || '').trim()
+  const dockerHost = readDockerHostName()
 
   const externalUrl = resolveHealthcheckUrl({ inputUrl, packageJsonPath: 'package.json' })
   console.log(
     `🔍 [healthcheck] Starting dual-layer verification for container "${containerName || '(none)'}"` +
       `${runnerName ? ` on runner "${runnerName}"` : ''}` +
-      `${externalUrl ? ` (external: ${externalUrl}, requireExternal=${requireExternal})` : ' (no external URL)'}...`
+      `${dockerHost ? ` [dockerHost=${dockerHost}]` : ''}` +
+      `${externalUrl ? ` (external: ${externalUrl}, requireExternal=${requireExternal}, staticParity=${verifyStaticParity})` : ' (no external URL)'}...`
   )
 
   let containerRunning = false
   let internalOk = false
+  let localIndexHtml = ''
 
   if (containerName) {
     const phase1Attempts = Math.min(retries, 5)
@@ -89,6 +117,9 @@ const main = async () => {
       }
     }
     if (containerRunning) {
+      if (verifyStaticParity) {
+        localIndexHtml = readContainerIndexHtml(containerName)
+      }
       console.log(
         internalOk
           ? `✅ [healthcheck] Phase 1 passed: container "${containerName}" running & 127.0.0.1:${internalPort} HTTP 200.`
@@ -107,6 +138,8 @@ const main = async () => {
       intervalMs,
       timeoutMs,
       expectedStatuses,
+      expectedLocalHtml: localIndexHtml,
+      dockerHost,
       logger: console
     })
   }
