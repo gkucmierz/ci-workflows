@@ -421,8 +421,9 @@ runs:
         '
 
         ACTIVE_RUNNER="${RUNNER_NAME:-unknown}"
+        DOCKER_HOST_NAME=$(docker info --format '{{.Name}}' 2>/dev/null || echo "unknown")
         EXPECTED_NODE="${{ inputs.expected_runner_node }}"
-        echo "🏃 Active runner: $ACTIVE_RUNNER (container: $CONTAINER, hot_swap_static: $HOT_SWAP, expected_node: ${EXPECTED_NODE:-any})"
+        echo "🏃 Active runner: $ACTIVE_RUNNER (dockerHost: $DOCKER_HOST_NAME, container: $CONTAINER, hot_swap_static: $HOT_SWAP, expected_node: ${EXPECTED_NODE:-any})"
         if [ "$EXPECTED_NODE" = "pl" ]; then
           case "$ACTIVE_RUNNER" in
             de-server-runner*|*self-hosted-de*)
@@ -475,6 +476,7 @@ runs:
         HC_TIMEOUT_SEC: ${{ inputs.healthcheck_timeout_sec }}
         HC_EXPECTED_STATUS: ${{ inputs.expected_status }}
         HC_INTERNAL_PORT: ${{ inputs.internal_probe_port }}
+        HC_VERIFY_STATIC_PARITY: ${{ inputs.hot_swap_static }}
       run: |
         [ -f "${{ github.action_path }}/../bin/post-deploy-healthcheck.mjs" ] || node "${{ github.action_path }}/../src/buildBin.mjs"
         node "${{ github.action_path }}/../bin/post-deploy-healthcheck.mjs"
