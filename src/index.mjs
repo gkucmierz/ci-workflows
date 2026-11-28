@@ -23,6 +23,8 @@ export {
   parseBooleanFlag,
   resolveHealthcheckUrl,
   classifyHealthcheckFailure,
+  extractStaticAssetFingerprints,
+  evaluateStaticAssetParity,
   probeExternalHealthcheck,
   evaluatePostDeployHealth
 } from './healthcheck.mjs'
