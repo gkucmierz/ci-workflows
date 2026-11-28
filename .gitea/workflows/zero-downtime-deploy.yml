@@ -539,7 +539,8 @@ jobs:
           '
           REQUESTED_RUNNER="${{ inputs.runs_on || 'self-hosted-pl' }}"
           ACTIVE_RUNNER="${RUNNER_NAME:-unknown}"
-          echo "🏃 Active runner: $ACTIVE_RUNNER (container: $CONTAINER, pinned: self-hosted-pl, requested runs_on: $REQUESTED_RUNNER)"
+          DOCKER_HOST_NAME=$(docker info --format '{{.Name}}' 2>/dev/null || echo "unknown")
+          echo "🏃 Active runner: $ACTIVE_RUNNER (dockerHost: $DOCKER_HOST_NAME, container: $CONTAINER, pinned: self-hosted-pl, requested runs_on: $REQUESTED_RUNNER)"
           if [ -n "$REQUESTED_RUNNER" ] && [ "$REQUESTED_RUNNER" != "self-hosted-pl" ] && [ "$REQUESTED_RUNNER" != "self-hosted" ]; then
             echo "❌ Reusable zero-downtime-deploy.yml is statically pinned to 'self-hosted-pl' (Gitea workflow_call drops dynamic runs-on expressions). For '$REQUESTED_RUNNER', invoke composite actions wait-for-deps@main + zero-downtime-swap@main directly under a static 'runs-on: $REQUESTED_RUNNER' job."
             exit 1
@@ -580,6 +581,7 @@ jobs:
           HC_REQUIRE_EXTERNAL: ${{ inputs.require_external_healthcheck }}
           HC_RETRIES: ${{ inputs.healthcheck_retries }}
           HC_EXPECTED_STATUS: ${{ inputs.expected_status }}
+          HC_VERIFY_STATIC_PARITY: ${{ inputs.hot_swap_static }}
         run: |
           node -e '
           const fs = require("fs");
@@ -588,6 +590,7 @@ jobs:
           const container = String(process.env.HC_CONTAINER || "").trim();
           const runnerName = String(process.env.RUNNER_NAME || "").trim();
           const requireExt = String(process.env.HC_REQUIRE_EXTERNAL ?? "true").trim().toLowerCase() !== "false";
+          const verifyParity = String(process.env.HC_VERIFY_STATIC_PARITY ?? "true").trim().toLowerCase() !== "false";
           const retries = Math.max(1, Math.min(30, Number(process.env.HC_RETRIES || 8)));
           const allowed = new Set(
             String(process.env.HC_EXPECTED_STATUS || "200,204,301,302,307,308")
@@ -602,6 +605,26 @@ jobs:
               if (p.homepage && /^https?:\/\//i.test(String(p.homepage))) url = String(p.homepage).trim();
             } catch {}
           }
+          const getDockerHost = () => {
+            try {
+              return execFileSync("docker", ["info", "--format", "{{.Name}}"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 4000 }).trim();
+            } catch { return ""; }
+          };
+          const readLocalIndex = () => {
+            try {
+              return execFileSync("docker", ["exec", container, "cat", "/usr/share/nginx/html/index.html"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+            } catch { return ""; }
+          };
+          const extractAssets = (html) => {
+            const set = new Set();
+            const re = /<(?:script|link)\b[^>]*(?:src|href)=["\x27]([^"\x27]+)["\x27][^>]*>/gi;
+            let m;
+            while ((m = re.exec(String(html || ""))) !== null) {
+              const ref = String(m[1] || "").trim().split(/[?#]/)[0];
+              if (/\/assets\/[^/]+[-.][A-Za-z0-9_-]{6,}\.(?:js|mjs|css)$/i.test(ref)) set.add(ref);
+            }
+            return [...set].sort();
+          };
           const isRunning = () => {
             try {
               return execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", container], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === "true";
@@ -633,7 +656,8 @@ jobs:
             return "Network/TLS error probing " + url + ": " + (err || "connection failed");
           };
           (async () => {
-            console.log("🔍 Dual-layer smoke test for \"" + container + "\"" + (runnerName ? " on runner \"" + runnerName + "\"" : "") + (url ? " (external: " + url + ", requireExternal=" + requireExt + ")" : " (no external URL)") + "...");
+            const dockerHost = getDockerHost();
+            console.log("🔍 Dual-layer smoke test for \"" + container + "\"" + (runnerName ? " on runner \"" + runnerName + "\"" : "") + (dockerHost ? " [dockerHost=" + dockerHost + "]" : "") + (url ? " (external: " + url + ", requireExternal=" + requireExt + ", staticParity=" + verifyParity + ")" : " (no external URL)") + "...");
             let running = false;
             let internalOk = false;
             const p1Max = Math.min(retries, 5);
@@ -653,6 +677,7 @@ jobs:
               printLogs();
               process.exit(1);
             }
+            const localAssets = verifyParity ? extractAssets(readLocalIndex()) : [];
             console.log(internalOk ? "✅ Phase 1 passed: container \"" + container + "\" running & 127.0.0.1:80 HTTP 200." : "ℹ️ Phase 1: container \"" + container + "\" is running.");
             if (!url) {
               console.log("✅ Smoke test passed (no external healthcheck_url configured).");
@@ -660,9 +685,11 @@ jobs:
             }
             let lastStatus = 0;
             let lastErr = "";
+            let lastParityErr = "";
             for (let i = 1; i <= retries; i++) {
               lastStatus = 0;
               lastErr = "";
+              lastParityErr = "";
               try {
                 const res = await fetch(url, {
                   method: "GET",
@@ -672,18 +699,31 @@ jobs:
                 });
                 lastStatus = Number(res.status) || 0;
                 if (allowed.has(lastStatus)) {
-                  console.log("✅ Phase 2 passed: external " + url + " -> HTTP " + lastStatus + " (attempt " + i + "/" + retries + ").");
-                  process.exit(0);
+                  if (localAssets.length > 0) {
+                    const extHtml = await res.text();
+                    if (/<(?:!doctype\s+html|html\b|head\b|script\b)/i.test(extHtml)) {
+                      const extAssets = extractAssets(extHtml);
+                      const extSet = new Set(extAssets);
+                      const missing = localAssets.filter((a) => !extSet.has(a));
+                      if (missing.length > 0) {
+                        lastParityErr = "Static bundle parity mismatch on " + url + ": local container" + (dockerHost ? " on Docker host \"" + dockerHost + "\"" : "") + " serves [" + localAssets.join(", ") + "], but live endpoint serves [" + (extAssets.join(", ") || "none") + "] — job likely deployed to the wrong server/runner or hit a stale proxy/edge cache.";
+                      }
+                    }
+                  }
+                  if (!lastParityErr) {
+                    console.log("✅ Phase 2 passed: external " + url + " -> HTTP " + lastStatus + (localAssets.length > 0 ? " (bundle parity verified)" : "") + " (attempt " + i + "/" + retries + ").");
+                    process.exit(0);
+                  }
                 }
               } catch (e) {
                 lastErr = e?.cause?.code || e?.cause?.message || e?.message || String(e);
               }
               if (i < retries) {
-                console.log("⏳ External probe " + i + "/" + retries + " for " + url + " returned " + (lastStatus > 0 ? "HTTP " + lastStatus : lastErr) + "; retrying in 2s...");
+                console.log("⏳ External probe " + i + "/" + retries + " for " + url + " returned " + (lastParityErr ? "bundle parity mismatch" : (lastStatus > 0 ? "HTTP " + lastStatus : lastErr)) + "; retrying in 2s...");
                 await sleep(2000);
               }
             }
-            const msg = diagnose(lastStatus, lastErr);
+            const msg = lastParityErr || diagnose(lastStatus, lastErr);
             if (!requireExt) {
               console.warn("⚠️ External healthcheck warning (non-blocking): " + msg);
               process.exit(0);
