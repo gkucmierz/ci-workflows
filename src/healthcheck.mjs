@@ -102,8 +102,70 @@ export const classifyHealthcheckFailure = ({ status = 0, error = '', url = '' } 
 }
 
 /**
+ * Extracts normalized hashed static asset references (e.g. Vite /assets/index-<hash>.js|.css)
+ * from an HTML document for post-deploy live-origin parity verification.
+ */
+export const extractStaticAssetFingerprints = (html = '') => {
+  const source = String(html || '')
+  if (!source) return []
+  const found = new Set()
+  const attrRe = /<(?:script|link)\b[^>]*(?:src|href)=["']([^"']+)["'][^>]*>/gi
+  let match
+  while ((match = attrRe.exec(source)) !== null) {
+    const rawRef = String(match[1] || '').trim()
+    if (!rawRef || /^(?:data:|javascript:|mailto:)/i.test(rawRef)) continue
+    const cleanRef = rawRef.split(/[?#]/)[0]
+    if (/\/assets\/[^/]+[-.][A-Za-z0-9_-]{6,}\.(?:js|mjs|css)$/i.test(cleanRef)) {
+      found.add(cleanRef)
+    }
+  }
+  return [...found].sort()
+}
+
+/**
+ * Verifies that a live external HTML response serves the same hashed static bundle(s)
+ * as the freshly deployed local container's index.html.
+ * Gracefully skips non-SPA containers or non-HTML health endpoints (e.g. /health returning JSON/text).
+ */
+export const evaluateStaticAssetParity = ({
+  localHtml = '',
+  externalHtml = '',
+  url = '',
+  dockerHost = ''
+} = {}) => {
+  const localAssets = extractStaticAssetFingerprints(localHtml)
+  if (localAssets.length === 0) {
+    return { ok: true, skipped: true, localAssets: [], externalAssets: [], missing: [], reason: '' }
+  }
+  const extText = String(externalHtml || '')
+  const looksLikeHtml = /<(?:!doctype\s+html|html\b|head\b|script\b)/i.test(extText)
+  if (!looksLikeHtml) {
+    return { ok: true, skipped: true, localAssets, externalAssets: [], missing: [], reason: '' }
+  }
+  const externalAssets = extractStaticAssetFingerprints(extText)
+  const extSet = new Set(externalAssets)
+  const missing = localAssets.filter((asset) => !extSet.has(asset))
+  if (missing.length === 0) {
+    return { ok: true, skipped: false, localAssets, externalAssets, missing: [], reason: '' }
+  }
+  const hostNote = dockerHost ? ` on Docker host "${dockerHost}"` : ''
+  return {
+    ok: false,
+    skipped: false,
+    localAssets,
+    externalAssets,
+    missing,
+    reason:
+      `Static bundle parity mismatch on ${url || 'target URL'}: local container${hostNote} serves ` +
+      `[${localAssets.join(', ')}], but live endpoint serves [${externalAssets.join(', ') || 'none'}] — ` +
+      'job likely deployed to the wrong server/runner or hit a stale proxy/edge cache.'
+  }
+}
+
+/**
  * Probes an external/public HTTP(S) URL with bounded retries and timeout.
  * Never treats 5xx or Cloudflare origin errors as healthy.
+ * When `expectedLocalHtml` contains hashed SPA assets, also verifies live bundle parity.
  */
 export const probeExternalHealthcheck = async ({
   url,
@@ -111,6 +173,8 @@ export const probeExternalHealthcheck = async ({
   intervalMs = DEFAULT_HEALTHCHECK_INTERVAL_MS,
   timeoutMs = DEFAULT_HEALTHCHECK_TIMEOUT_MS,
   expectedStatuses = DEFAULT_HEALTHY_STATUSES,
+  expectedLocalHtml = '',
+  dockerHost = '',
   fetchImpl = globalThis.fetch,
   sleepImpl = sleepDefault,
   logger = console
@@ -125,7 +189,8 @@ export const probeExternalHealthcheck = async ({
       attempts: 0,
       location: '',
       diagnosis: '',
-      error: ''
+      error: '',
+      parityChecked: false
     }
   }
 
@@ -133,15 +198,18 @@ export const probeExternalHealthcheck = async ({
   const maxAttempts = Math.max(1, Math.min(30, Number(retries) || DEFAULT_HEALTHCHECK_RETRIES))
   const delayMs = Math.max(0, Number(intervalMs) || DEFAULT_HEALTHCHECK_INTERVAL_MS)
   const reqTimeoutMs = Math.max(1000, Number(timeoutMs) || DEFAULT_HEALTHCHECK_TIMEOUT_MS)
+  const wantParity = extractStaticAssetFingerprints(expectedLocalHtml).length > 0
 
   let lastStatus = 0
   let lastError = ''
   let lastLocation = ''
+  let lastParityDiagnosis = ''
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     lastStatus = 0
     lastError = ''
     lastLocation = ''
+    lastParityDiagnosis = ''
 
     try {
       const signal =
@@ -163,15 +231,32 @@ export const probeExternalHealthcheck = async ({
         res?.headers && res.headers.get ? String(res.headers.get('location') || '') : ''
 
       if (allowed.has(lastStatus)) {
-        return {
-          ok: true,
-          skipped: false,
-          url: cleanUrl,
-          status: lastStatus,
-          attempts: attempt,
-          location: lastLocation,
-          diagnosis: '',
-          error: ''
+        let parityChecked = false
+        if (wantParity && res?.text && res.text.call) {
+          const bodyText = await res.text()
+          const parity = evaluateStaticAssetParity({
+            localHtml: expectedLocalHtml,
+            externalHtml: bodyText,
+            url: cleanUrl,
+            dockerHost
+          })
+          parityChecked = !parity.skipped
+          if (!parity.ok) {
+            lastParityDiagnosis = parity.reason
+          }
+        }
+        if (!lastParityDiagnosis) {
+          return {
+            ok: true,
+            skipped: false,
+            url: cleanUrl,
+            status: lastStatus,
+            attempts: attempt,
+            location: lastLocation,
+            diagnosis: '',
+            error: '',
+            parityChecked
+          }
         }
       }
     } catch (err) {
@@ -179,7 +264,11 @@ export const probeExternalHealthcheck = async ({
     }
 
     if (attempt < maxAttempts) {
-      const detail = lastStatus > 0 ? `HTTP ${lastStatus}` : lastError || 'no response'
+      const detail = lastParityDiagnosis
+        ? 'static bundle mismatch (waiting for reload)'
+        : lastStatus > 0
+          ? `HTTP ${lastStatus}`
+          : lastError || 'no response'
       logger?.log?.(
         `⏳ [healthcheck] External probe ${attempt}/${maxAttempts} for ${cleanUrl} returned ${detail}; retrying in ${Math.round(delayMs / 1000)}s...`
       )
@@ -187,11 +276,13 @@ export const probeExternalHealthcheck = async ({
     }
   }
 
-  const diagnosis = classifyHealthcheckFailure({
-    status: lastStatus,
-    error: lastError,
-    url: cleanUrl
-  })
+  const diagnosis =
+    lastParityDiagnosis ||
+    classifyHealthcheckFailure({
+      status: lastStatus,
+      error: lastError,
+      url: cleanUrl
+    })
 
   return {
     ok: false,
@@ -201,7 +292,9 @@ export const probeExternalHealthcheck = async ({
     attempts: maxAttempts,
     location: lastLocation,
     diagnosis,
-    error: lastError
+    error: lastError,
+    parityMismatch: Boolean(lastParityDiagnosis),
+    parityChecked: Boolean(lastParityDiagnosis)
   }
 }
 
